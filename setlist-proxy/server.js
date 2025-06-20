@@ -352,17 +352,142 @@ app.post('/upload-moment', authenticateToken, async (req, res) => {
   }
 });
 
-// Get user moments
-app.get('/moments', authenticateToken, async (req, res) => {
+// ===== UPDATED MOMENTS ENDPOINTS =====
+
+// Get user's own moments (private)
+app.get('/moments/my', authenticateToken, async (req, res) => {
   try {
     const moments = await Moment.find({ user: req.user.id })
       .sort({ createdAt: -1 })
       .populate('user', 'email displayName');
 
+    console.log(`👤 Found ${moments.length} moments for user ${req.user.id}`);
     res.json({ moments });
   } catch (err) {
-    console.error('❌ Fetch moments error:', err);
+    console.error('❌ Fetch user moments error:', err);
+    res.status(500).json({ error: 'Failed to fetch user moments' });
+  }
+});
+
+// Get ALL moments (public feed) - MAIN ENDPOINT FOR YOUR APP
+app.get('/moments', async (req, res) => {
+  try {
+    const moments = await Moment.find({})
+      .sort({ createdAt: -1 })
+      .limit(100) // Limit to latest 100 moments
+      .populate('user', 'displayName'); // Only show display name for privacy
+
+    console.log(`🌍 Returning ${moments.length} moments in global feed`);
+    res.json({ moments });
+  } catch (err) {
+    console.error('❌ Fetch all moments error:', err);
     res.status(500).json({ error: 'Failed to fetch moments' });
+  }
+});
+
+// Get ALL moments for a specific song across all performances
+app.get('/moments/song/:songName', async (req, res) => {
+  try {
+    const { songName } = req.params;
+    
+    const moments = await Moment.find({ 
+      songName: { $regex: new RegExp(songName, 'i') } // Case-insensitive search
+    })
+      .sort({ createdAt: -1 })
+      .populate('user', 'displayName');
+    
+    console.log(`🎵 Found ${moments.length} moments for song "${songName}"`);
+    res.json({ moments });
+  } catch (err) {
+    console.error('❌ Fetch song moments error:', err);
+    res.status(500).json({ error: 'Failed to fetch song moments' });
+  }
+});
+
+// Get ALL moments for a specific performance
+app.get('/moments/performance/:performanceId', async (req, res) => {
+  try {
+    const { performanceId } = req.params;
+    
+    const moments = await Moment.find({ performanceId })
+      .sort({ songPosition: 1, createdAt: -1 }) // Sort by song position, then by upload time
+      .populate('user', 'displayName');
+    
+    console.log(`🎪 Found ${moments.length} moments for performance ${performanceId}`);
+    res.json({ moments });
+  } catch (err) {
+    console.error('❌ Fetch performance moments error:', err);
+    res.status(500).json({ error: 'Failed to fetch performance moments' });
+  }
+});
+
+// Search moments by venue
+app.get('/moments/venue/:venueName', async (req, res) => {
+  try {
+    const { venueName } = req.params;
+    
+    const moments = await Moment.find({ 
+      venueName: { $regex: new RegExp(venueName, 'i') } 
+    })
+      .sort({ createdAt: -1 })
+      .populate('user', 'displayName');
+    
+    console.log(`🏟️ Found ${moments.length} moments for venue "${venueName}"`);
+    res.json({ moments });
+  } catch (err) {
+    console.error('❌ Fetch venue moments error:', err);
+    res.status(500).json({ error: 'Failed to fetch venue moments' });
+  }
+});
+
+// Update moment metadata (only by owner) - NEW ENDPOINT!
+app.put('/moments/:momentId', authenticateToken, async (req, res) => {
+  try {
+    const momentId = req.params.momentId;
+    const userId = req.user.id;
+
+    console.log('🔧 Update request received:', { momentId, userId, body: req.body });
+
+    // Find the moment and check ownership
+    const moment = await Moment.findById(momentId);
+    if (!moment) {
+      console.error('❌ Moment not found:', momentId);
+      return res.status(404).json({ error: 'Moment not found' });
+    }
+
+    // Check if user owns this moment
+    if (moment.user.toString() !== userId) {
+      console.error('❌ Not authorized:', { momentOwner: moment.user.toString(), requestUser: userId });
+      return res.status(403).json({ error: 'Not authorized to edit this moment' });
+    }
+
+    // Update the moment with new data
+    const updatedMoment = await Moment.findByIdAndUpdate(
+      momentId,
+      {
+        $set: {
+          setName: req.body.setName,
+          momentDescription: req.body.momentDescription,
+          emotionalTags: req.body.emotionalTags,
+          momentType: req.body.momentType,
+          specialOccasion: req.body.specialOccasion,
+          instruments: req.body.instruments,
+          audioQuality: req.body.audioQuality,
+          videoQuality: req.body.videoQuality,
+          crowdReaction: req.body.crowdReaction,
+          guestAppearances: req.body.guestAppearances,
+          personalNote: req.body.personalNote
+        }
+      },
+      { new: true }
+    ).populate('user', 'displayName');
+
+    console.log('✅ Moment updated successfully:', momentId);
+    res.json({ success: true, moment: updatedMoment });
+
+  } catch (err) {
+    console.error('❌ Update moment error:', err);
+    res.status(500).json({ error: 'Failed to update moment', details: err.message });
   }
 });
 
