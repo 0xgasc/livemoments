@@ -54,7 +54,6 @@ const upload = multer({
 });
 
 // Import your uploaders
-const { hybridUpload } = require('./utils/bundlrUploader');
 const { uploadFileToIrys, validateBuffer } = require('./utils/irysUploader');
 
 // JWT token helpers
@@ -188,7 +187,9 @@ app.post('/upload-file', authenticateToken, (req, res, next) => {
     let uri;
     try {
       console.log('📤 Using hybrid upload strategy...');
-      uri = await hybridUpload(req.file.buffer, req.file.originalname);
+      const result = await uploadFileToIrys(req.file.buffer, req.file.originalname);
+      uri = result.url;
+      
       console.log('✅ Hybrid upload successful:', uri);
     } catch (uploadError) {
       console.error('❌ Hybrid upload failed:', uploadError);
