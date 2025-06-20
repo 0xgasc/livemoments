@@ -12,15 +12,48 @@ const Moment = require('./models/Moment');
 const app = express();
 const PORT = 5050;
 
-// Middleware setup
-app.use(cors());
-app.use(express.json());
+// Enhanced CORS setup for file uploads
+app.use(cors({
+  origin: true, // Allow all origins for development
+  credentials: true
+}));
 
+app.use(express.json({ limit: '6gb' })); // Increase JSON limit to 6GB
+app.use(express.urlencoded({ limit: '6gb', extended: true })); // Add URL encoded limit
+
+// Enhanced multer configuration for large files (up to 6GB for Zora compatibility)
 const storage = multer.memoryStorage();
-const upload = multer({ storage });
+const upload = multer({ 
+  storage,
+  limits: {
+    fileSize: 6 * 1024 * 1024 * 1024, // 6GB limit to match Zora
+    fieldSize: 6 * 1024 * 1024 * 1024, // 6GB field size
+    fields: 10,
+    files: 1,
+    parts: 1000
+  },
+  fileFilter: (req, file, cb) => {
+    console.log(`📁 Multer received file:`, {
+      originalname: file.originalname,
+      mimetype: file.mimetype,
+      size: file.size || 'size not available yet'
+    });
+    
+    // Check file size early if possible
+    const maxSize = 6 * 1024 * 1024 * 1024; // 6GB
+    if (file.size && file.size > maxSize) {
+      console.error(`❌ File too large: ${(file.size / 1024 / 1024 / 1024).toFixed(2)}GB exceeds 6GB limit`);
+      return cb(new Error('File exceeds 6GB limit'), false);
+    }
+    
+    // Accept all file types but log them
+    cb(null, true);
+  }
+});
 
-const { estimateAndUpload } = require('./utils/bundlrUploader');
-// const uploadFileToIrys = require('./utils/irysUploader'); // Optional fallback
+// Import your uploaders
+const { hybridUpload } = require('./utils/bundlrUploader');
+const { uploadFileToIrys, validateBuffer } = require('./utils/irysUploader');
 
 // JWT token helpers
 const generateToken = (user) => {
@@ -97,16 +130,152 @@ app.post('/login', async (req, res) => {
   }
 });
 
-// Upload file via Bundlr to Arweave
-app.post('/upload-file', authenticateToken, upload.single('file'), async (req, res) => {
+// Enhanced file upload endpoint with better debugging and large file handling
+app.post('/upload-file', authenticateToken, (req, res, next) => {
+  // Add timeout for large file uploads (30 minutes)
+  req.setTimeout(30 * 60 * 1000); // 30 minutes
+  res.setTimeout(30 * 60 * 1000); // 30 minutes
+  next();
+}, upload.single('file'), async (req, res) => {
   try {
-    if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
+    console.log(`🔍 Upload request received:`, {
+      hasFile: !!req.file,
+      headers: req.headers,
+      bodyKeys: Object.keys(req.body)
+    });
 
-    const uri = await estimateAndUpload(req.file.buffer, req.file.originalname);
-    res.json({ success: true, fileUri: uri });
+    if (!req.file) {
+      console.error('❌ No file in request');
+      return res.status(400).json({ error: 'No file uploaded' });
+    }
+
+    const fileSizeGB = (req.file.size / 1024 / 1024 / 1024).toFixed(2);
+    console.log(`📁 File details:`, {
+      originalname: req.file.originalname,
+      mimetype: req.file.mimetype,
+      size: req.file.size,
+      sizeGB: `${fileSizeGB}GB`,
+      bufferLength: req.file.buffer?.length,
+      bufferType: typeof req.file.buffer,
+      isBuffer: Buffer.isBuffer(req.file.buffer)
+    });
+
+    // Check if file is too large for memory
+    if (req.file.size > 6 * 1024 * 1024 * 1024) {
+      console.error(`❌ File too large: ${fileSizeGB}GB exceeds 6GB limit`);
+      return res.status(413).json({ 
+        error: 'File too large', 
+        details: `File size ${fileSizeGB}GB exceeds 6GB limit` 
+      });
+    }
+
+    // Validate the buffer before upload
+    if (!validateBuffer(req.file.buffer, req.file.originalname)) {
+      console.error('❌ Buffer validation failed');
+      return res.status(400).json({ error: 'Invalid file buffer' });
+    }
+
+    console.log(`🚀 Starting upload process for ${fileSizeGB}GB file...`);
+    
+    // Use hybrid upload strategy that handles both small and large files efficiently
+    let uri;
+    try {
+      console.log('📤 Using hybrid upload strategy...');
+      uri = await hybridUpload(req.file.buffer, req.file.originalname);
+      console.log('✅ Hybrid upload successful:', uri);
+    } catch (uploadError) {
+      console.error('❌ Hybrid upload failed:', uploadError);
+      
+      // Fallback to Irys for smaller files only
+      if (req.file.size < 500 * 1024 * 1024) { // Less than 500MB
+        console.log('📤 Falling back to Irys upload for smaller file...');
+        try {
+          const result = await uploadFileToIrys(req.file.buffer, req.file.originalname);
+          uri = result.url;
+          console.log('✅ Irys fallback upload successful:', uri);
+        } catch (irysError) {
+          console.error('❌ Irys fallback also failed:', irysError);
+          throw uploadError; // Throw original error
+        }
+      } else {
+        throw uploadError;
+      }
+    }
+
+    console.log(`✅ Upload completed successfully: ${uri}`);
+    res.json({ 
+      success: true, 
+      fileUri: uri,
+      metadata: {
+        originalName: req.file.originalname,
+        size: req.file.size,
+        sizeGB: fileSizeGB,
+        mimetype: req.file.mimetype
+      }
+    });
+
   } catch (err) {
     console.error('❌ Upload error:', err);
-    res.status(500).json({ error: 'File upload failed' });
+    console.error('Error stack:', err.stack);
+    
+    // Provide more specific error messages
+    let errorMessage = 'File upload failed';
+    let statusCode = 500;
+    
+    if (err.message.includes('File too large') || err.code === 'LIMIT_FILE_SIZE') {
+      errorMessage = 'File exceeds size limit';
+      statusCode = 413;
+    } else if (err.message.includes('timeout')) {
+      errorMessage = 'Upload timed out - file may be too large';
+      statusCode = 408;
+    } else if (err.message.includes('ENOTFOUND') || err.message.includes('network')) {
+      errorMessage = 'Network error - check internet connection';
+      statusCode = 503;
+    }
+    
+    res.status(statusCode).json({ 
+      error: errorMessage,
+      details: err.message 
+    });
+  }
+});
+
+// Test endpoint to check uploaded file
+app.get('/test-file/:fileId', async (req, res) => {
+  try {
+    const fileId = req.params.fileId;
+    const url = `https://gateway.irys.xyz/${fileId}`;
+    
+    console.log(`🔍 Testing file: ${url}`);
+    
+    const fetch = (await import('node-fetch')).default;
+    const response = await fetch(url);
+    
+    if (!response.ok) {
+      return res.status(404).json({ error: 'File not found' });
+    }
+    
+    const contentType = response.headers.get('content-type');
+    const contentLength = response.headers.get('content-length');
+    
+    console.log(`📊 File info:`, {
+      contentType,
+      contentLength,
+      status: response.status
+    });
+    
+    res.json({
+      success: true,
+      fileId,
+      url,
+      contentType,
+      contentLength,
+      headers: Object.fromEntries(response.headers.entries())
+    });
+    
+  } catch (err) {
+    console.error('❌ Test file error:', err);
+    res.status(500).json({ error: 'Failed to test file' });
   }
 });
 
@@ -147,6 +316,38 @@ app.get('/moments', authenticateToken, async (req, res) => {
     console.error('❌ Fetch moments error:', err);
     res.status(500).json({ error: 'Failed to fetch moments' });
   }
+});
+
+// Error handling middleware
+app.use((error, req, res, next) => {
+  console.error('❌ Unhandled error:', error);
+  
+  if (error instanceof multer.MulterError) {
+    if (error.code === 'LIMIT_FILE_SIZE') {
+      return res.status(413).json({ 
+        error: 'File too large', 
+        details: 'File exceeds 6GB limit',
+        maxSize: '6GB'
+      });
+    } else if (error.code === 'LIMIT_FIELD_SIZE') {
+      return res.status(413).json({ 
+        error: 'Field too large', 
+        details: 'Upload field exceeds size limit' 
+      });
+    } else if (error.code === 'LIMIT_UNEXPECTED_FILE') {
+      return res.status(400).json({ 
+        error: 'Unexpected file field', 
+        details: 'Only single file uploads are supported' 
+      });
+    }
+    
+    return res.status(400).json({ 
+      error: 'Upload error', 
+      details: error.message 
+    });
+  }
+  
+  res.status(500).json({ error: 'Internal server error' });
 });
 
 app.listen(PORT, () => {
