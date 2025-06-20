@@ -14,8 +14,10 @@ const PORT = 5050;
 
 // Enhanced CORS setup for file uploads
 app.use(cors({
-  origin: true, // Allow all origins for development
-  credentials: true
+  origin: ['http://localhost:3000', 'http://127.0.0.1:3000'], // Allow React dev server
+  credentials: true,
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization']
 }));
 
 app.use(express.json({ limit: '6gb' })); // Increase JSON limit to 6GB
@@ -56,8 +58,10 @@ const { hybridUpload } = require('./utils/bundlrUploader');
 const { uploadFileToIrys, validateBuffer } = require('./utils/irysUploader');
 
 // JWT token helpers
+const JWT_SECRET = process.env.JWT_SECRET || 'fallback-secret-key-for-development';
+
 const generateToken = (user) => {
-  return jwt.sign({ id: user._id, email: user.email }, process.env.JWT_SECRET, { expiresIn: '7d' });
+  return jwt.sign({ id: user._id, email: user.email }, JWT_SECRET, { expiresIn: '7d' });
 };
 
 const authenticateToken = (req, res, next) => {
@@ -65,8 +69,11 @@ const authenticateToken = (req, res, next) => {
   const token = authHeader?.split(' ')[1];
   if (!token) return res.status(401).json({ error: 'No token provided' });
 
-  jwt.verify(token, process.env.JWT_SECRET, (err, user) => {
-    if (err) return res.status(403).json({ error: 'Invalid token' });
+  jwt.verify(token, JWT_SECRET, (err, user) => {
+    if (err) {
+      console.log('🔐 Token verification failed:', err.message);
+      return res.status(403).json({ error: 'Invalid or expired token. Please log in again.' });
+    }
     req.user = user;
     next();
   });
@@ -281,26 +288,66 @@ app.get('/test-file/:fileId', async (req, res) => {
 
 // Upload moment (record metadata + media URI)
 app.post('/upload-moment', authenticateToken, async (req, res) => {
-  const { performanceId, songName, mediaUrl, fileUri } = req.body;
+  const { 
+    performanceId, 
+    performanceDate,
+    venueName,
+    venueCity,
+    venueCountry,
+    songName, 
+    setName,
+    songPosition,
+    mediaUrl, 
+    fileUri,
+    mediaType,
+    fileName,
+    fileSize
+  } = req.body;
+  
   const userId = req.user.id;
 
+  console.log('💾 Received moment upload request:', {
+    performanceId,
+    performanceDate,
+    venueName,
+    venueCity,
+    songName,
+    mediaUrl: fileUri || mediaUrl,
+    userId
+  });
+
   if (!performanceId || !songName || (!mediaUrl && !fileUri)) {
-    return res.status(400).json({ error: 'Missing required fields' });
+    return res.status(400).json({ error: 'Missing required fields: performanceId, songName, and media URL' });
   }
 
   try {
     const moment = new Moment({
       user: userId,
       performanceId,
+      performanceDate,
+      venueName,
+      venueCity,
+      venueCountry,
       songName,
+      setName,
+      songPosition,
       mediaUrl: fileUri || mediaUrl,
+      mediaType,
+      fileName,
+      fileSize
     });
 
     await moment.save();
+    
+    // Populate user data for response
+    await moment.populate('user', 'email displayName');
+    
+    console.log('✅ Moment saved successfully:', moment._id);
+    
     res.json({ success: true, moment });
   } catch (err) {
     console.error('❌ Upload moment error:', err);
-    res.status(500).json({ error: 'Moment upload failed' });
+    res.status(500).json({ error: 'Moment upload failed', details: err.message });
   }
 });
 
