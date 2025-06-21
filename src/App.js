@@ -83,12 +83,94 @@ const AuthProvider = ({ children }) => {
   );
 };
 
-// Artist Search Component
+// Artist Search Component with Recent Activity Prioritization (IMPROVEMENT #3)
 const ArtistSearch = ({ onArtistSelect, currentArtist }) => {
   const [searchQuery, setSearchQuery] = useState('');
   const [searchResults, setSearchResults] = useState([]);
   const [searching, setSearching] = useState(false);
   const [showResults, setShowResults] = useState(false);
+
+  // Check if artist has recent concerts with songs (2024-2025)
+  const checkRecentActivity = async (artist) => {
+    try {
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 3000);
+      
+      const response = await fetch(
+        `http://localhost:5050/api/rest/1.0/artist/${artist.mbid}/setlists?p=1`,
+        { 
+          headers: { Accept: 'application/json' },
+          signal: controller.signal
+        }
+      );
+      
+      clearTimeout(timeoutId);
+      
+      if (response.ok) {
+        const data = await response.json();
+        const setlists = data.setlist || [];
+        
+        // Check for recent concerts (2024-2025) with actual songs
+        const recentConcerts = setlists.filter(setlist => {
+          // Parse date (DD-MM-YYYY format)
+          if (!setlist.eventDate) return false;
+          
+          const parts = setlist.eventDate.split('-');
+          if (parts.length === 3) {
+            const year = parseInt(parts[2]);
+            const hasRecentDate = year >= 2024 && year <= 2025;
+            
+            // Check if has actual songs
+            const hasSongs = setlist.sets?.set?.some(set => 
+              set.song && Array.isArray(set.song) && set.song.length > 0
+            );
+            
+            return hasRecentDate && hasSongs;
+          }
+          return false;
+        });
+        
+        const activityScore = recentConcerts.length;
+        console.log(`🎪 ${artist.name}: ${activityScore} recent concerts with songs`);
+        
+        return {
+          hasRecentActivity: activityScore > 0,
+          activityScore,
+          totalSetlists: setlists.length
+        };
+      }
+      
+      return { hasRecentActivity: false, activityScore: 0, totalSetlists: 0 };
+    } catch (err) {
+      return { hasRecentActivity: false, activityScore: 0, totalSetlists: 0 };
+    }
+  };
+
+  // Enhanced filtering to remove tribute bands and prioritize major artists
+  const filterTributeBands = (artists) => {
+    const tributeKeywords = [
+      'tribute', 'cover', 'covers', 'salute', 'homage', 'experience', 
+      'revival', 'legacy', 'ultimate', 'complete', 'definitive'
+    ];
+    
+    return artists.filter(artist => {
+      const name = artist.name.toLowerCase();
+      const disambiguation = (artist.disambiguation || '').toLowerCase();
+      
+      // Filter out obvious tribute bands
+      const isTribute = tributeKeywords.some(keyword => 
+        name.includes(keyword) || disambiguation.includes(keyword)
+      );
+      
+      // Filter out bands with country/city prefixes that are usually tribute bands
+      const hasLocationPrefix = /^(dutch|belgian|german|french|american|canadian|australian|british|uk|us)\s/i.test(name);
+      
+      // Filter out obvious description patterns
+      const hasDescriptivePattern = /\b(band of|version of|plays|performing|covers)\b/i.test(disambiguation);
+      
+      return !isTribute && !hasLocationPrefix && !hasDescriptivePattern;
+    });
+  };
 
   const searchArtists = async (query) => {
     if (!query.trim()) {
@@ -107,23 +189,69 @@ const ArtistSearch = ({ onArtistSelect, currentArtist }) => {
 
       if (response.ok) {
         const data = await response.json();
-        console.log('📊 Search results:', data);
+        console.log('📊 Raw search results:', data);
         
-        // Filter and sort results - exact matches first, then partial matches
         const artists = data.artist || [];
-        const filteredArtists = artists
-          .filter(artist => artist.name && artist.mbid) // Must have name and ID
-          .sort((a, b) => {
-            // Exact match gets priority
-            const aExact = a.name.toLowerCase() === query.toLowerCase();
-            const bExact = b.name.toLowerCase() === query.toLowerCase();
-            if (aExact && !bExact) return -1;
-            if (bExact && !aExact) return 1;
-            // Then by name length (shorter = more likely to be main artist)
-            return a.name.length - b.name.length;
-          });
+        if (artists.length === 0) {
+          setSearchResults([]);
+          setShowResults(true);
+          return;
+        }
         
-        setSearchResults(filteredArtists);
+        // First filter out tribute bands and obvious non-main artists
+        const filteredArtists = filterTributeBands(artists)
+          .filter(artist => artist.name && artist.mbid)
+          .slice(0, 20); // Check more results after filtering
+        
+        console.log(`🎯 After filtering tribute bands: ${filteredArtists.length} artists remaining`);
+        console.log('Filtered artists:', filteredArtists.map(a => a.name));
+        
+        // Check recent activity for each artist in parallel
+        const activityPromises = filteredArtists.map(async (artist) => {
+          const activity = await checkRecentActivity(artist);
+          return { artist, ...activity };
+        });
+        
+        const resultsWithActivity = await Promise.all(activityPromises);
+        
+        // Enhanced sorting algorithm
+        const sortedResults = resultsWithActivity.sort((a, b) => {
+          // 1. Exact match gets highest priority
+          const aExact = a.artist.name.toLowerCase() === query.toLowerCase();
+          const bExact = b.artist.name.toLowerCase() === query.toLowerCase();
+          if (aExact && !bExact) return -1;
+          if (bExact && !aExact) return 1;
+          
+          // 2. Artists with lots of setlists (major artists) get priority
+          const aMajor = a.totalSetlists >= 100; // Major artist threshold
+          const bMajor = b.totalSetlists >= 100;
+          if (aMajor && !bMajor) return -1;
+          if (bMajor && !aMajor) return 1;
+          
+          // 3. Then by recent activity score (2024-2025 concerts with songs)
+          if (a.activityScore !== b.activityScore) {
+            return b.activityScore - a.activityScore;
+          }
+          
+          // 4. Then by total setlists (popularity indicator)
+          if (a.totalSetlists !== b.totalSetlists) {
+            return b.totalSetlists - a.totalSetlists;
+          }
+          
+          // 5. Finally by name length (shorter = more likely main artist)
+          return a.artist.name.length - b.artist.name.length;
+        });
+        
+        const topResults = sortedResults.slice(0, 10);
+        
+        console.log(`🎯 Final prioritized results:`, topResults.map(r => ({
+          name: r.artist.name,
+          recentActivity: r.activityScore,
+          totalSetlists: r.totalSetlists,
+          isMajor: r.totalSetlists >= 100
+        })));
+        
+        setSearchResults(topResults);
         setShowResults(true);
       } else {
         console.error('Search API error:', response.status);
@@ -151,8 +279,8 @@ const ArtistSearch = ({ onArtistSelect, currentArtist }) => {
     }, 500);
   };
 
-  const selectArtist = (artist) => {
-    onArtistSelect(artist);
+  const selectArtist = (resultWithActivity) => {
+    onArtistSelect(resultWithActivity.artist);
     setSearchQuery('');
     setSearchResults([]);
     setShowResults(false);
@@ -176,20 +304,47 @@ const ArtistSearch = ({ onArtistSelect, currentArtist }) => {
       </div>
 
       {/* Search Results Dropdown */}
-      {showResults && searchResults.length > 0 && (
+      {showResults && (
         <div className="absolute top-full left-0 right-0 mt-1 bg-white border border-gray-200 rounded-lg shadow-lg z-50 max-h-64 overflow-y-auto">
-          {searchResults.slice(0, 10).map((artist) => (
-            <button
-              key={artist.mbid}
-              onClick={() => selectArtist(artist)}
-              className="w-full px-4 py-3 text-left hover:bg-gray-50 border-b border-gray-100 last:border-b-0"
-            >
-              <div className="font-medium">{artist.name}</div>
-              {artist.disambiguation && (
-                <div className="text-sm text-gray-500">{artist.disambiguation}</div>
-              )}
-            </button>
-          ))}
+          {searchResults.length === 0 ? (
+            <div className="px-4 py-3 text-gray-500 text-center">
+              No artists found
+            </div>
+          ) : (
+            searchResults.map((resultWithActivity) => (
+              <button
+                key={resultWithActivity.artist.mbid}
+                onClick={() => selectArtist(resultWithActivity)}
+                className="w-full px-4 py-3 text-left hover:bg-gray-50 border-b border-gray-100 last:border-b-0"
+              >
+                <div className="flex justify-between items-center">
+                  <div className="flex-1">
+                    <div className="font-medium">{resultWithActivity.artist.name}</div>
+                    {resultWithActivity.artist.disambiguation && (
+                      <div className="text-sm text-gray-500">{resultWithActivity.artist.disambiguation}</div>
+                    )}
+                  </div>
+                  <div className="text-right ml-2">
+                    {resultWithActivity.hasRecentActivity && (
+                      <span className="inline-block px-2 py-1 bg-green-100 text-green-800 text-xs rounded-full mr-1">
+                        Recent Activity
+                      </span>
+                    )}
+                    {resultWithActivity.totalSetlists >= 100 && (
+                      <span className="inline-block px-2 py-1 bg-blue-100 text-blue-800 text-xs rounded-full mr-1">
+                        Major Artist
+                      </span>
+                    )}
+                    {resultWithActivity.totalSetlists > 0 && (
+                      <div className="text-xs text-gray-500 mt-1">
+                        {resultWithActivity.totalSetlists} concerts
+                      </div>
+                    )}
+                  </div>
+                </div>
+              </button>
+            ))
+          )}
         </div>
       )}
 
@@ -211,160 +366,161 @@ const ArtistSearch = ({ onArtistSelect, currentArtist }) => {
   );
 };
 
-// Featured Artists Component
+// Featured Artists Component - ENHANCED WITH BETTER SEARCH (IMPROVEMENT #2)
 const FeaturedArtists = ({ onArtistSelect }) => {
   const [featuredArtists, setFeaturedArtists] = useState([]);
   const [loading, setLoading] = useState(true);
 
-  // Prioritize the artists that work best - UMO first, then the ones mentioned
-  const artistNames = [
-    'Unknown Mortal Orchestra',  // This works - put first
-    'Fontaines D.C.',           // This works - put second  
-    'Green Day',                // Popular, should work
-    'Tyler, The Creator',       // Popular, should work
-    'SiR',
-    'Fatboy Slim',
-    'Daniel Me Estas Matando', 
-    'Ca7riel y Paco Amoroso'
+  // EXACT list of 8 featured artists with alternative search terms
+  const EXACT_FEATURED_ARTISTS = [
+    { 
+      name: 'Unknown Mortal Orchestra', 
+      alternatives: ['UMO', 'Unknown Mortal Orchestra'] 
+    },
+    { 
+      name: 'Fontaines D.C.', 
+      alternatives: ['Fontaines DC', 'Fontaines D.C.', 'Fontaines D C'] 
+    },
+    { 
+      name: 'Green Day', 
+      alternatives: ['Green Day', 'Greenday'] 
+    },
+    { 
+      name: 'Tyler, The Creator', 
+      alternatives: ['Tyler, The Creator', 'Tyler the Creator', 'Tyler,The Creator'] 
+    },
+    { 
+      name: 'SiR', 
+      alternatives: ['SiR', 'Sir'] 
+    },
+    { 
+      name: 'Fatboy Slim', 
+      alternatives: ['Fatboy Slim', 'Fat Boy Slim'] 
+    },
+    { 
+      name: 'Daniel Me Estas Matando', 
+      alternatives: ['Daniel Me Estas Matando', 'Daniel me estas matando'] 
+    },
+    { 
+      name: 'Ca7riel y Paco Amoroso', 
+      alternatives: ['Ca7riel y Paco Amoroso', 'Catriel y Paco Amoroso', 'Ca7riel & Paco Amoroso'] 
+    }
   ];
 
-  // Simplified validation - just check if artist has ANY setlists
-  const validateArtist = async (artist) => {
-    try {
-      const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 3000); // 3 second timeout
-      
-      const response = await fetch(
-        `http://localhost:5050/api/rest/1.0/artist/${artist.mbid}/setlists?p=1`,
-        { 
-          headers: { Accept: 'application/json' },
-          signal: controller.signal
-        }
-      );
-      
-      clearTimeout(timeoutId);
-      
-      if (response.ok) {
-        const data = await response.json();
-        const setlists = data.setlist || [];
+  // Enhanced search with multiple strategies
+  const findArtistWithStrategies = async (artistConfig) => {
+    const { name, alternatives } = artistConfig;
+    
+    console.log(`🔍 Searching for featured artist: ${name}`);
+    
+    // Try each alternative name
+    for (const searchTerm of alternatives) {
+      try {
+        console.log(`   Trying search term: "${searchTerm}"`);
         
-        // Simplified validation - just need ANY setlists
-        const hasSetlists = setlists.length > 0;
-        console.log(`🎵 ${artist.name}: ${setlists.length} setlists (${hasSetlists ? 'VALID' : 'SKIP'})`);
-        return hasSetlists;
-      }
-      return false;
-    } catch (err) {
-      if (err.name === 'AbortError') {
-        console.log(`⏰ ${artist.name}: validation timeout`);
-      } else {
-        console.error(`❌ Validation error for ${artist.name}:`, err);
-      }
-      return false;
-    }
-  };
-
-  // Find best artist match with timeout
-  const findBestArtist = async (artistName) => {
-    try {
-      console.log(`🔍 Searching for: ${artistName}`);
-      
-      const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 5000); // 5 second timeout
-      
-      const response = await fetch(
-        `http://localhost:5050/api/rest/1.0/search/artists?artistName=${encodeURIComponent(artistName)}`,
-        { 
-          headers: { Accept: 'application/json' },
-          signal: controller.signal
-        }
-      );
-      
-      clearTimeout(timeoutId);
-      
-      if (response.ok) {
-        const data = await response.json();
-        const artists = data.artist || [];
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 8000); // Increased timeout
         
-        // Find exact match first
-        let bestMatch = artists.find(artist => 
-          artist.name.toLowerCase() === artistName.toLowerCase()
+        const response = await fetch(
+          `http://localhost:5050/api/rest/1.0/search/artists?artistName=${encodeURIComponent(searchTerm)}`,
+          { 
+            headers: { Accept: 'application/json' },
+            signal: controller.signal
+          }
         );
         
-        // If no exact match, find closest match (no collaborations)
-        if (!bestMatch) {
-          bestMatch = artists
-            .filter(artist => 
-              !artist.name.toLowerCase().includes('feat') &&
-              !artist.name.toLowerCase().includes('featuring') &&
-              !artist.name.toLowerCase().includes(' & ') &&
-              !artist.name.toLowerCase().includes(' and ') &&
-              !artist.name.toLowerCase().includes(' x ')
-            )
-            .sort((a, b) => a.name.length - b.name.length)[0];
+        clearTimeout(timeoutId);
+        
+        if (response.ok) {
+          const data = await response.json();
+          const artists = data.artist || [];
+          
+          console.log(`   Found ${artists.length} results for "${searchTerm}"`);
+          
+          // Try exact match first
+          let exactMatch = artists.find(artist => 
+            artist.name.toLowerCase() === searchTerm.toLowerCase()
+          );
+          
+          // If no exact match, try close variations
+          if (!exactMatch) {
+            exactMatch = artists.find(artist => {
+              const artistName = artist.name.toLowerCase();
+              const searchName = searchTerm.toLowerCase();
+              
+              // Remove punctuation and compare
+              const cleanArtist = artistName.replace(/[.,\-_\s]/g, '');
+              const cleanSearch = searchName.replace(/[.,\-_\s]/g, '');
+              
+              return cleanArtist === cleanSearch;
+            });
+          }
+          
+          // If still no match, try the first result that's not obviously wrong
+          if (!exactMatch && artists.length > 0) {
+            exactMatch = artists.find(artist => {
+              const artistName = artist.name.toLowerCase();
+              // Avoid tribute bands and covers
+              return !artistName.includes('tribute') && 
+                     !artistName.includes('cover') && 
+                     !artistName.includes('experience') &&
+                     !(artist.disambiguation && artist.disambiguation.toLowerCase().includes('tribute'));
+            });
+          }
+          
+          if (exactMatch) {
+            console.log(`✅ Found featured artist: ${exactMatch.name}`);
+            
+            // Quick validation - check if they have any setlists at all
+            try {
+              const validateResponse = await fetch(
+                `http://localhost:5050/api/rest/1.0/artist/${exactMatch.mbid}/setlists?p=1`,
+                { headers: { Accept: 'application/json' } }
+              );
+              
+              if (validateResponse.ok) {
+                const validateData = await validateResponse.json();
+                const hasSetlists = validateData.setlist && validateData.setlist.length > 0;
+                
+                if (hasSetlists) {
+                  console.log(`   Validated: ${exactMatch.name} has ${validateData.setlist.length} setlists`);
+                  return exactMatch;
+                } else {
+                  console.log(`   Skipping: ${exactMatch.name} has no setlists`);
+                }
+              }
+            } catch (validateErr) {
+              console.log(`   Validation failed for ${exactMatch.name}, but keeping anyway`);
+              return exactMatch; // Keep it even if validation fails
+            }
+          }
         }
         
-        if (bestMatch) {
-          console.log(`✅ Found match: ${bestMatch.name}`);
-          return bestMatch;
+        // Small delay between attempts
+        await new Promise(resolve => setTimeout(resolve, 200));
+        
+      } catch (err) {
+        if (err.name === 'AbortError') {
+          console.log(`   ⏰ Timeout for "${searchTerm}"`);
+        } else {
+          console.log(`   ❌ Error searching "${searchTerm}":`, err.message);
         }
+        continue;
       }
-      return null;
-    } catch (err) {
-      if (err.name === 'AbortError') {
-        console.log(`⏰ ${artistName}: search timeout`);
-      } else {
-        console.error(`❌ Error fetching ${artistName}:`, err);
-      }
-      return null;
     }
+    
+    console.log(`❌ Could not find featured artist: ${name}`);
+    return null;
   };
 
-  useEffect(() => {
-    const fetchFeaturedArtists = async () => {
-      console.log('🎯 Fetching featured artists (prioritized)...');
-      const validArtists = [];
-      
-      // Process artists in parallel but with staggered delays
-      const artistPromises = artistNames.map(async (artistName, index) => {
-        // Stagger requests to avoid rate limiting
-        await new Promise(resolve => setTimeout(resolve, index * 300));
-        
-        try {
-          const artist = await findBestArtist(artistName);
-          if (artist) {
-            // For now, skip validation to speed up loading - just trust the search
-            console.log(`✅ Adding ${artist.name} without validation (faster loading)`);
-            return { artist, index };
-          }
-        } catch (err) {
-          console.error(`Failed to process ${artistName}:`, err);
-        }
-        return null;
-      });
-
-      // Wait for all promises and filter valid results
-      const results = await Promise.all(artistPromises);
-      const validResults = results
-        .filter(result => result !== null)
-        .sort((a, b) => a.index - b.index) // Maintain order
-        .map(result => result.artist)
-        .slice(0, 6); // Show max 6 featured artists for faster loading
-
-      console.log(`✅ Featured artists loaded: ${validResults.map(a => a.name).join(', ')}`);
-      setFeaturedArtists(validResults);
-      setLoading(false);
-    };
-
-    fetchFeaturedArtists();
-  }, []);
+  
 
   if (loading) {
     return (
       <div className="mb-8">
         <h2 className="text-2xl font-bold text-center mb-6">Featured Artists</h2>
         <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-6 gap-4">
-          {[...Array(6)].map((_, i) => (
+          {[...Array(8)].map((_, i) => (
             <div key={i} className="p-4 bg-gray-100 rounded-lg shadow-sm animate-pulse">
               <div className="h-4 bg-gray-300 rounded w-3/4 mx-auto"></div>
             </div>
@@ -393,11 +549,14 @@ const FeaturedArtists = ({ onArtistSelect }) => {
           </button>
         ))}
       </div>
-      {featuredArtists.length < 6 && (
-        <div className="text-center mt-4 text-sm text-gray-500">
-          Found {featuredArtists.length} featured artists
-        </div>
-      )}
+      <div className="text-center mt-4 text-sm text-gray-500">
+        Showing {featuredArtists.length} of 8 featured artists
+        {featuredArtists.length < 8 && (
+          <span className="text-orange-600 ml-2">
+            ({8 - featuredArtists.length} not found - check console for details)
+          </span>
+        )}
+      </div>
     </div>
   );
 };
@@ -2273,7 +2432,7 @@ const SmartSongDisplay = ({ song, songIndex, setlist, setInfo, handleUploadMomen
   );
 };
 
-// Updated Main Setlists Component
+// Main Setlists Component
 function Setlists({ selectedArtist }) {
   const [setlists, setSetlists] = useState([]);
   const [loading, setLoading] = useState(false);
@@ -2341,7 +2500,7 @@ function Setlists({ selectedArtist }) {
     });
   };
 
-  // Only render if artist is selected (no default message here)
+  // Only render if artist is selected
   if (!selectedArtist) {
     return null;
   }
@@ -2419,11 +2578,11 @@ function Setlists({ selectedArtist }) {
   );
 }
 
-// FIXED: Main App Component with proper context structure
+// Main App Component with IMPROVED LAYOUT (IMPROVEMENT #1)
 function MainApp() {
   const [selectedArtist, setSelectedArtist] = useState(null);
   const [showLogin, setShowLogin] = useState(false);
-  const { user, logout, loading } = useAuth(); // NOW PROPERLY INSIDE AuthProvider
+  const { user, logout, loading } = useAuth();
 
   // Handle URL parameters
   useEffect(() => {
@@ -2514,17 +2673,14 @@ function MainApp() {
           </div>
         </div>
 
-        {/* Featured Artists */}
-        <FeaturedArtists onArtistSelect={handleArtistSelect} />
-
         {/* Artist Search */}
         <div className="mb-8">
           <ArtistSearch onArtistSelect={handleArtistSelect} currentArtist={selectedArtist} />
         </div>
 
-        {/* Conditional Layout based on artist selection */}
+        {/* IMPROVED CONDITIONAL LAYOUT (IMPROVEMENT #1) */}
         {selectedArtist ? (
-          // When artist is selected: Show Artist Setlists first, then Recent Concerts
+          // When artist is selected: Show Artist Setlists first, then Recent Concerts, then Featured Artists at bottom
           <>
             {/* Artist Setlists - Priority when artist selected */}
             <Setlists selectedArtist={selectedArtist} />
@@ -2533,17 +2689,25 @@ function MainApp() {
             <div className="mt-12 pt-8 border-t border-gray-200">
               <RecentConcerts onConcertSelect={handleConcertSelect} />
             </div>
+
+            {/* Featured Artists - Moved to bottom when artist selected */}
+            <div className="mt-12 pt-8 border-t border-gray-200">
+              <FeaturedArtists onArtistSelect={handleArtistSelect} />
+            </div>
           </>
         ) : (
-          // When no artist selected: Show Recent Concerts first, then "select artist" message
+          // When no artist selected: Show Featured Artists first, then Recent Concerts
           <>
-            {/* Recent Concerts - Priority when no artist selected */}
+            {/* Featured Artists - Priority when no artist selected */}
+            <FeaturedArtists onArtistSelect={handleArtistSelect} />
+            
+            {/* Recent Concerts */}
             <RecentConcerts onConcertSelect={handleConcertSelect} />
             
             {/* Select Artist Message */}
             <div className="text-center py-12 mt-8">
-              <div className="text-xl text-gray-600 mb-4">Select an artist to view their setlists</div>
-              <div className="text-gray-500">Choose from featured artists above or search for any artist</div>
+              <div className="text-xl text-gray-600 mb-4">Search for any artist above to view their setlists</div>
+              <div className="text-gray-500">Or choose from featured artists to get started</div>
             </div>
           </>
         )}
@@ -2552,7 +2716,7 @@ function MainApp() {
   );
 }
 
-// FIXED: App Component - AuthProvider wraps MainApp
+// App Component - AuthProvider wraps MainApp
 export default function App() {
   return (
     <AuthProvider>
