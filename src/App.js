@@ -253,7 +253,7 @@ const FeaturedArtists = ({ onArtistSelect }) => {
   return (
     <div className="mb-8">
       <h2 className="text-2xl font-bold text-center mb-6">Featured Artists</h2>
-      <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-6 gap-4">
+      <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-6 gap-3 sm:gap-4">
         {FEATURED_ARTISTS.map((artist) => (
           <button
             key={artist.mbid}
@@ -329,7 +329,7 @@ const RecentConcerts = ({ onConcertSelect }) => {
   return (
     <div className="mb-8">
       <h2 className="text-2xl font-bold text-center mb-6">Latest Concerts</h2>
-      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-5 gap-4">
+      <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-3 sm:gap-4">
         {recentConcerts.map((concert) => {
           const totalSongs = concert.sets?.set?.reduce((total, set) => 
             total + (set.song?.length || 0), 0
@@ -1170,7 +1170,7 @@ function Setlists({ selectedArtist }) {
   return (
     <div>
       <div className="mb-6">
-        <h2 className="text-2xl font-bold">{selectedArtist.name} Setlists</h2>
+        <h2 className="text-xl sm:text-2xl font-bold">{selectedArtist.name} Setlists</h2>
         <p className="text-gray-600">Upload moments from their performances</p>
       </div>
 
@@ -1307,7 +1307,7 @@ function MainApp() {
       <div className="p-4 max-w-7xl mx-auto">
         {/* Header */}
         <div className="flex justify-between items-center mb-8">
-          <h1 className="text-4xl font-bold">Concert Moments</h1>
+          <h1 className="text-2xl sm:text-4xl font-bold">Concert Moments</h1>
           <div className="flex items-center gap-4">
             {user ? (
               <>

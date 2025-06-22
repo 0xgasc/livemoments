@@ -86,16 +86,18 @@ export const styles = {
   },
   
   // Buttons
-  button: {
+   button: {
     primary: {
       backgroundColor: '#3b82f6',
       color: 'white',
       border: 'none',
       borderRadius: '6px',
-      padding: '0.75rem 1.5rem',
+      padding: '0.875rem 1.5rem', // CHANGED: Larger padding
       cursor: 'pointer',
       fontSize: '1rem',
-      fontWeight: '600'
+      fontWeight: '600',
+      minHeight: '44px', // ADDED: iOS minimum
+      touchAction: 'manipulation' // ADDED: Prevent double-tap zoom
     },
     
     secondary: {
@@ -103,41 +105,11 @@ export const styles = {
       color: 'white',
       border: 'none',
       borderRadius: '6px',
-      padding: '0.75rem 1.5rem',
-      cursor: 'pointer',
-      fontSize: '1rem'
-    },
-    
-    success: {
-      backgroundColor: '#10b981',
-      color: 'white',
-      border: 'none',
-      borderRadius: '6px',
-      padding: '0.75rem 1.5rem',
+      padding: '0.875rem 1.5rem', // CHANGED: Larger padding
       cursor: 'pointer',
       fontSize: '1rem',
-      fontWeight: '600'
-    },
-    
-    danger: {
-      backgroundColor: '#ef4444',
-      color: 'white',
-      border: 'none',
-      borderRadius: '6px',
-      padding: '0.5rem 1rem',
-      cursor: 'pointer',
-      fontSize: '0.875rem'
-    },
-    
-    disabled: {
-      backgroundColor: '#9ca3af',
-      color: 'white',
-      border: 'none',
-      borderRadius: '6px',
-      padding: '0.75rem 1.5rem',
-      cursor: 'not-allowed',
-      fontSize: '1rem',
-      fontWeight: '600'
+      minHeight: '44px', // ADDED: iOS minimum
+      touchAction: 'manipulation' // ADDED
     },
     
     small: {
@@ -145,12 +117,13 @@ export const styles = {
       color: 'white',
       border: 'none',
       borderRadius: '4px',
-      padding: '0.25rem 0.75rem',
+      padding: '0.5rem 1rem', // CHANGED: Larger padding
       cursor: 'pointer',
-      fontSize: '0.875rem'
+      fontSize: '0.875rem',
+      minHeight: '36px', // ADDED: Smaller but still touch-friendly
+      touchAction: 'manipulation' // ADDED
     }
   },
-  
   // Section styles
   section: {
     container: {
@@ -288,3 +261,34 @@ export const styles = {
     }
   }
 };
+
+export const mobileOptimizedStyles = {
+  // Update your existing modal styles with these:
+  modal: {
+    overlay: {
+      position: 'fixed',
+      top: 0,
+      left: 0,
+      right: 0,
+      bottom: 0,
+      backgroundColor: 'rgba(0, 0, 0, 0.7)',
+      zIndex: 99999,
+      display: 'flex',
+      alignItems: 'flex-start', // CHANGED: Was 'center'
+      justifyContent: 'center',
+      padding: '1rem',
+      overflowY: 'auto' // ADDED: Allows scrolling
+    },
+    
+    content: {
+      backgroundColor: 'white',
+      padding: window.innerWidth <= 640 ? '1.5rem' : '2rem', // CHANGED: Less padding on mobile
+      borderRadius: window.innerWidth <= 640 ? '0' : '12px', // CHANGED: No radius on mobile
+      border: '2px solid #3b82f6',
+      maxWidth: '700px',
+      width: window.innerWidth <= 640 ? '100%' : '95%', // CHANGED: Full width on mobile
+      maxHeight: window.innerWidth <= 640 ? '100vh' : '90vh', // CHANGED: Full height on mobile
+      overflow: 'auto',
+      margin: window.innerWidth <= 640 ? '0' : '20px auto' // ADDED: No margin on mobile
+    }
+  },}
