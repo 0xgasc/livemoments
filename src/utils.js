@@ -86,12 +86,9 @@ export const formatShortDate = (dateString) => {
 
 // Featured Artists with official setlist.fm IDs
 export const FEATURED_ARTISTS = [
+  { name: 'Muse', mbid: '9c9f1380-2516-4fc9-a3e6-f9f61941d090' },
   { name: 'Unknown Mortal Orchestra', mbid: '33d2ccc9' },
   { name: 'Fontaines D.C.', mbid: '2bcac0f6' },
   { name: 'Green Day', mbid: '13d68939' },
-  { name: 'Tyler, The Creator', mbid: '73d2e2cd' },
-  { name: 'SiR', mbid: '63c7ca07' },
-  { name: 'Fatboy Slim', mbid: '33d6b0ad' },
-  { name: 'Daniel Me Estas Matando', mbid: '63f31a0f' },
-  { name: 'Ca7riel y Paco Amoroso', mbid: '5bf6136c' }
+  { name: 'Daniel Me Estas Matando', mbid: '63f31a0f' }
 ];

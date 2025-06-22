@@ -1,4 +1,4 @@
-import React, { useEffect, useState, createContext, useContext } from 'react';
+import React, { useEffect, useState, createContext, useContext, useCallback, useMemo } from 'react';
 import { styles } from './styles';
 import { formatDate, formatShortDate, formatFileSize, FEATURED_ARTISTS } from './utils';
 
@@ -85,64 +85,196 @@ const AuthProvider = ({ children }) => {
   );
 };
 
-// Simplified Artist Search Component
+// Custom hook for proper debouncing
+const useDebounce = (value, delay) => {
+  const [debouncedValue, setDebouncedValue] = useState(value);
+
+  useEffect(() => {
+    const handler = setTimeout(() => {
+      setDebouncedValue(value);
+    }, delay);
+
+    return () => {
+      clearTimeout(handler);
+    };
+  }, [value, delay]);
+
+  return debouncedValue;
+};
+
+// Get major artist status helper
+const getMajorArtistStatus = async (artist) => {
+  try {
+    console.log(`🔍 Fetching setlists for ${artist.name} (${artist.mbid})...`);
+    
+    const response = await fetch(
+      `http://localhost:5050/api/rest/1.0/artist/${artist.mbid}/setlists?p=1`,
+      { 
+        headers: { Accept: 'application/json' },
+        signal: AbortSignal.timeout(8000)
+      }
+    );
+
+    if (response.ok) {
+      const data = await response.json();
+      const totalSetlists = data.total || 0;
+      const setlists = data.setlist || [];
+      
+      console.log(`✅ Successfully fetched ${totalSetlists} setlists for ${artist.name}`);
+      
+      // Check if artist is currently on tour (concert in last 90 days)
+      const ninetyDaysAgo = new Date();
+      ninetyDaysAgo.setDate(ninetyDaysAgo.getDate() - 90);
+      
+      const isOnTour = setlists.some(setlist => {
+        if (!setlist.eventDate) return false;
+        
+        try {
+          // Handle DD-MM-YYYY format from setlist.fm
+          const [day, month, year] = setlist.eventDate.split('-').map(Number);
+          const concertDate = new Date(year, month - 1, day); // month is 0-indexed
+          return concertDate >= ninetyDaysAgo;
+        } catch (err) {
+          return false;
+        }
+      });
+      
+      return {
+        ...artist,
+        totalSetlists,
+        isMajorArtist: totalSetlists >= 50,
+        isOnTour
+      };
+    } else if (response.status === 404) {
+      console.log(`⚠️ No setlists found for ${artist.name} (this is normal for some artists)`);
+      return { ...artist, totalSetlists: 0, isMajorArtist: false, isOnTour: false };
+    } else {
+      console.error(`❌ Failed to fetch setlists for ${artist.name}:`, response.status, response.statusText);
+      return { ...artist, totalSetlists: 0, isMajorArtist: false, isOnTour: false };
+    }
+  } catch (err) {
+    console.error('❌ Error fetching setlist count for', artist.name, ':', err);
+    return { ...artist, totalSetlists: 0, isMajorArtist: false, isOnTour: false };
+  }
+};
+
+// Enhanced Artist Search Component
 const ArtistSearch = ({ onArtistSelect, currentArtist }) => {
   const [searchQuery, setSearchQuery] = useState('');
   const [searchResults, setSearchResults] = useState([]);
   const [searching, setSearching] = useState(false);
   const [showResults, setShowResults] = useState(false);
+  const [error, setError] = useState('');
 
-  const searchArtists = async (query) => {
+  const debouncedSearchQuery = useDebounce(searchQuery, 500);
+
+  const searchArtists = useCallback(async (query) => {
     if (!query.trim()) {
       setSearchResults([]);
       setShowResults(false);
+      setError('');
       return;
     }
 
     setSearching(true);
+    setError('');
+    
     try {
+      // Special handling for Muse (since search API doesn't return them)
+      if (query.toLowerCase().trim() === 'muse') {
+        console.log('🎯 Using direct MBID for Muse');
+        const museArtist = { name: 'Muse', mbid: '9c9f1380-2516-4fc9-a3e6-f9f61941d090' };
+        
+        try {
+          const artistWithStatus = await getMajorArtistStatus(museArtist);
+          setSearchResults([artistWithStatus]);
+          setShowResults(true);
+          setSearching(false);
+          return;
+        } catch (err) {
+          console.error('❌ Error with Muse - will try API search as fallback:', err);
+        }
+      }
+
+      // Regular API search
       const response = await fetch(
         `http://localhost:5050/api/rest/1.0/search/artists?artistName=${encodeURIComponent(query)}`,
-        { headers: { Accept: 'application/json' } }
+        { 
+          headers: { Accept: 'application/json' },
+          signal: AbortSignal.timeout(10000)
+        }
       );
 
-      if (response.ok) {
-        const data = await response.json();
-        const artists = (data.artist || [])
-          .filter(artist => artist.name && artist.mbid)
-          .sort((a, b) => {
-            // Exact match gets priority
-            const aExact = a.name.toLowerCase() === query.toLowerCase();
-            const bExact = b.name.toLowerCase() === query.toLowerCase();
-            if (aExact && !bExact) return -1;
-            if (bExact && !aExact) return 1;
-            
-            // Then by name length (shorter = more likely main artist)
-            return a.name.length - b.name.length;
-          })
-          .slice(0, 10);
-        
-        setSearchResults(artists);
-        setShowResults(true);
+      if (!response.ok) {
+        throw new Error(`Search failed: ${response.status}`);
       }
+
+      const data = await response.json();
+      let artists = (data.artist || []).filter(artist => artist.name && artist.mbid);
+
+      console.log('🔍 API search results for "' + query + '":', artists.map(a => `${a.name} (${a.mbid})`));
+
+      if (artists.length === 0) {
+        setError(`No artists found for "${query}". Try searching for a different artist.`);
+        setSearchResults([]);
+        setShowResults(true);
+        return;
+      }
+
+      // Smart sorting
+      const queryLower = query.toLowerCase();
+      const sortedArtists = artists.sort((a, b) => {
+        const aName = a.name.toLowerCase();
+        const bName = b.name.toLowerCase();
+        
+        // 1. Exact match gets highest priority
+        const aExact = aName === queryLower;
+        const bExact = bName === queryLower;
+        if (aExact && !bExact) return -1;
+        if (bExact && !aExact) return 1;
+        
+        // 2. Starts with query gets priority
+        const aStarts = aName.startsWith(queryLower);
+        const bStarts = bName.startsWith(queryLower);
+        if (aStarts && !bStarts) return -1;
+        if (bStarts && !aStarts) return 1;
+        
+        // 3. Penalize obvious tribute bands
+        const aTribute = /tribute|cover|plays|experience|society|duo|cover/i.test((a.name + ' ' + (a.disambiguation || '')));
+        const bTribute = /tribute|cover|plays|experience|society|duo|cover/i.test((b.name + ' ' + (b.disambiguation || '')));
+        if (!aTribute && bTribute) return -1;
+        if (!bTribute && aTribute) return 1;
+        
+        // 4. Shorter name = more likely to be main artist
+        return a.name.length - b.name.length;
+      }).slice(0, 10);
+
+      console.log('🎯 Sorted results:', sortedArtists.map(a => `${a.name} (${a.mbid}) ${a.disambiguation || ''}`));
+
+      // Get major artist status
+      const artistsWithStatus = await Promise.all(
+        sortedArtists.map(getMajorArtistStatus)
+      );
+
+      setSearchResults(artistsWithStatus);
+      setShowResults(true);
+      
     } catch (err) {
       console.error('Artist search error:', err);
+      setError(err.name === 'AbortError' ? 'Search timed out. Try again.' : 'Search failed. Check your connection.');
+      setSearchResults([]);
+      setShowResults(true);
     } finally {
       setSearching(false);
     }
-  };
+  }, []);
+
+  useEffect(() => {
+    searchArtists(debouncedSearchQuery);
+  }, [debouncedSearchQuery, searchArtists]);
 
   const handleSearch = (e) => {
-    const query = e.target.value;
-    setSearchQuery(query);
-    
-    if (window.searchTimeout) {
-      clearTimeout(window.searchTimeout);
-    }
-    
-    window.searchTimeout = setTimeout(() => {
-      searchArtists(query);
-    }, 500);
+    setSearchQuery(e.target.value);
   };
 
   const selectArtist = (artist) => {
@@ -150,6 +282,14 @@ const ArtistSearch = ({ onArtistSelect, currentArtist }) => {
     setSearchQuery('');
     setSearchResults([]);
     setShowResults(false);
+    setError('');
+  };
+
+  const clearSearch = () => {
+    setSearchQuery('');
+    setSearchResults([]);
+    setShowResults(false);
+    setError('');
   };
 
   return (
@@ -160,18 +300,31 @@ const ArtistSearch = ({ onArtistSelect, currentArtist }) => {
           value={searchQuery}
           onChange={handleSearch}
           placeholder="Search for any artist..."
-          className="w-full px-4 py-3 text-lg border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+          className="w-full px-4 py-3 text-lg border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent pr-10"
         />
-        {searching && (
-          <div className="absolute right-3 top-3">
+        
+        <div className="absolute right-3 top-3 flex items-center gap-2">
+          {searching && (
             <div className="animate-spin rounded-full h-6 w-6 border-b-2 border-blue-600"></div>
-          </div>
-        )}
+          )}
+          {searchQuery && (
+            <button
+              onClick={clearSearch}
+              className="text-gray-400 hover:text-gray-600 text-xl leading-none"
+            >
+              ×
+            </button>
+          )}
+        </div>
       </div>
 
       {showResults && (
-        <div className="absolute top-full left-0 right-0 mt-1 bg-white border border-gray-200 rounded-lg shadow-lg z-50 max-h-64 overflow-y-auto">
-          {searchResults.length === 0 ? (
+        <div className="absolute top-full left-0 right-0 mt-1 bg-white border border-gray-200 rounded-lg shadow-lg z-50 max-h-80 overflow-y-auto">
+          {error ? (
+            <div className="px-4 py-3 text-red-600 text-center text-sm">
+              {error}
+            </div>
+          ) : searchResults.length === 0 ? (
             <div className="px-4 py-3 text-gray-500 text-center">
               No artists found
             </div>
@@ -182,10 +335,31 @@ const ArtistSearch = ({ onArtistSelect, currentArtist }) => {
                 onClick={() => selectArtist(artist)}
                 className="w-full px-4 py-3 text-left hover:bg-gray-50 border-b border-gray-100 last:border-b-0"
               >
-                <div className="font-medium">{artist.name}</div>
-                {artist.disambiguation && (
-                  <div className="text-sm text-gray-500">{artist.disambiguation}</div>
-                )}
+                <div className="flex items-center justify-between">
+                  <div>
+                    <div className="font-medium flex items-center gap-2 flex-wrap">
+                      {artist.name}
+                      {artist.isMajorArtist && (
+                        <span className="px-2 py-1 text-xs bg-yellow-100 text-yellow-800 rounded-full">
+                          50+ shows
+                        </span>
+                      )}
+                      {artist.isOnTour && (
+                        <span className="px-2 py-1 text-xs bg-green-100 text-green-800 rounded-full">
+                          on tour
+                        </span>
+                      )}
+                    </div>
+                    {artist.disambiguation && (
+                      <div className="text-sm text-gray-500">{artist.disambiguation}</div>
+                    )}
+                  </div>
+                  {artist.totalSetlists > 0 && (
+                    <div className="text-xs text-gray-400">
+                      {artist.totalSetlists} concerts
+                    </div>
+                  )}
+                </div>
               </button>
             ))
           )}
@@ -209,15 +383,18 @@ const ArtistSearch = ({ onArtistSelect, currentArtist }) => {
   );
 };
 
-// Simplified Featured Artists Component
+// Featured Artists Component (simplified)
 const FeaturedArtists = ({ onArtistSelect }) => {
   const [loading, setLoading] = useState({});
+  const [artistCache, setArtistCache] = useState(new Map());
 
-  const handleFeaturedArtistClick = async (artistName) => {
-    setLoading(prev => ({ ...prev, [artistName]: true }));
-    
+  const getCachedArtistData = useCallback(async (artistName) => {
+    // Check cache first
+    if (artistCache.has(artistName)) {
+      return artistCache.get(artistName);
+    }
+
     try {
-      // Search for the artist to get full data including correct mbid
       const response = await fetch(
         `http://localhost:5050/api/rest/1.0/search/artists?artistName=${encodeURIComponent(artistName)}`,
         { headers: { Accept: 'application/json' } }
@@ -227,23 +404,49 @@ const FeaturedArtists = ({ onArtistSelect }) => {
         const data = await response.json();
         const artists = data.artist || [];
         
-        // Find exact match
         const exactMatch = artists.find(a => 
           a.name.toLowerCase() === artistName.toLowerCase()
         );
         
-        if (exactMatch) {
-          onArtistSelect(exactMatch);
-        } else if (artists.length > 0) {
-          // Fallback to first result
-          onArtistSelect(artists[0]);
-        } else {
-          console.error('Artist not found:', artistName);
-          alert(`Could not find artist: ${artistName}`);
+        const result = exactMatch || (artists.length > 0 ? artists[0] : null);
+        
+        // Cache the result
+        if (result) {
+          setArtistCache(prev => new Map(prev).set(artistName, result));
         }
+        
+        return result;
       }
     } catch (err) {
       console.error('Error fetching artist:', err);
+    }
+    
+    return null;
+  }, [artistCache]);
+
+  const handleFeaturedArtistClick = async (artistName) => {
+    setLoading(prev => ({ ...prev, [artistName]: true }));
+    
+    try {
+      // Special case for Muse
+      if (artistName.toLowerCase() === 'muse') {
+        const museArtist = { name: 'Muse', mbid: '9c9f1380-2516-4fc9-a3e6-f9f61941d090' };
+        console.log('🎯 Using direct MBID for Muse:', museArtist);
+        onArtistSelect(museArtist);
+        return;
+      }
+      
+      // For all other artists: use search API
+      const artistData = await getCachedArtistData(artistName);
+      
+      if (artistData) {
+        onArtistSelect(artistData);
+      } else {
+        console.error('Artist not found:', artistName);
+        alert(`Could not find artist: ${artistName}`);
+      }
+    } catch (err) {
+      console.error('Error loading artist:', err);
       alert('Error loading artist data');
     } finally {
       setLoading(prev => ({ ...prev, [artistName]: false }));
@@ -252,111 +455,26 @@ const FeaturedArtists = ({ onArtistSelect }) => {
 
   return (
     <div className="mb-8">
-      <h2 className="text-2xl font-bold text-center mb-6">Featured Artists</h2>
       <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-6 gap-3 sm:gap-4">
         {FEATURED_ARTISTS.map((artist) => (
           <button
             key={artist.mbid}
             onClick={() => handleFeaturedArtistClick(artist.name)}
             disabled={loading[artist.name]}
-            className="p-4 bg-white rounded-lg shadow-sm hover:shadow-md transition-shadow border border-gray-200 hover:border-blue-300 disabled:opacity-50"
+            className="p-4 bg-white rounded-lg shadow-sm hover:shadow-md transition-all duration-200 border border-gray-200 hover:border-blue-300 disabled:opacity-50 disabled:cursor-not-allowed"
           >
             <div className="text-sm font-medium text-center text-gray-900 leading-tight">
-              {loading[artist.name] ? 'Loading...' : artist.name}
+              {loading[artist.name] ? (
+                <div className="flex items-center justify-center">
+                  <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-blue-600 mr-2"></div>
+                  Loading...
+                </div>
+              ) : (
+                artist.name
+              )}
             </div>
           </button>
         ))}
-      </div>
-    </div>
-  );
-};
-
-// Simplified Recent Concerts Component
-const RecentConcerts = ({ onConcertSelect }) => {
-  const [recentConcerts, setRecentConcerts] = useState([]);
-  const [loading, setLoading] = useState(true);
-
-  useEffect(() => {
-    const fetchRecentConcerts = async () => {
-      try {
-        const response = await fetch(
-          `http://localhost:5050/api/rest/1.0/search/setlists?p=1`,
-          { headers: { Accept: 'application/json' } }
-        );
-
-        if (response.ok) {
-          const data = await response.json();
-          const concerts = (data.setlist || [])
-            .filter(concert => 
-              concert.artist?.name && 
-              concert.venue?.name && 
-              concert.venue?.city?.name &&
-              concert.eventDate &&
-              concert.sets?.set?.some(set => 
-                set.song && Array.isArray(set.song) && set.song.length > 0
-              )
-            )
-            .slice(0, 10);
-
-          setRecentConcerts(concerts);
-        }
-      } catch (err) {
-        console.error('Error fetching recent concerts:', err);
-        setRecentConcerts([]);
-      } finally {
-        setLoading(false);
-      }
-    };
-
-    fetchRecentConcerts();
-  }, []);
-
-  if (loading) {
-    return (
-      <div className="mb-8">
-        <h2 className="text-2xl font-bold text-center mb-6">Latest Concerts</h2>
-        <div className="text-center py-8">
-          <div className="text-gray-500">Loading recent concerts...</div>
-        </div>
-      </div>
-    );
-  }
-
-  if (recentConcerts.length === 0) {
-    return null;
-  }
-
-  return (
-    <div className="mb-8">
-      <h2 className="text-2xl font-bold text-center mb-6">Latest Concerts</h2>
-      <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-3 sm:gap-4">
-        {recentConcerts.map((concert) => {
-          const totalSongs = concert.sets?.set?.reduce((total, set) => 
-            total + (set.song?.length || 0), 0
-          ) || 0;
-          
-          return (
-            <button
-              key={concert.id}
-              onClick={() => onConcertSelect(concert)}
-              className="p-4 bg-white rounded-lg shadow-sm hover:shadow-md transition-shadow border border-gray-200 hover:border-blue-300 text-left"
-            >
-              <div className="font-medium text-blue-600 mb-1">{concert.artist.name}</div>
-              <div className="text-sm text-gray-600 mb-1">{concert.venue.name}</div>
-              <div className="text-sm text-gray-500 mb-2">
-                {concert.venue.city.name}, {concert.venue.city.country?.name}
-              </div>
-              <div className="flex justify-between items-center">
-                <div className="text-xs text-gray-400">
-                  {formatShortDate(concert.eventDate)}
-                </div>
-                <div className="text-xs bg-green-100 text-green-800 px-2 py-1 rounded-full">
-                  {totalSongs} songs
-                </div>
-              </div>
-            </button>
-          );
-        })}
       </div>
     </div>
   );
@@ -441,9 +559,16 @@ const Login = () => {
           <button
             onClick={handleSubmit}
             disabled={loading || !email || !password || (!isLogin && !displayName)}
-            className="w-full bg-blue-600 text-white py-2 px-4 rounded-md hover:bg-blue-700 disabled:opacity-50"
+            className="w-full bg-blue-600 text-white py-2 px-4 rounded-md hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed"
           >
-            {loading ? 'Processing...' : (isLogin ? 'Login' : 'Register')}
+            {loading ? (
+              <div className="flex items-center justify-center">
+                <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-white mr-2"></div>
+                Processing...
+              </div>
+            ) : (
+              isLogin ? 'Login' : 'Register'
+            )}
           </button>
         </div>
         
@@ -460,7 +585,7 @@ const Login = () => {
   );
 };
 
-// Moment Detail Modal (Read-only)
+// Moment Detail Modal
 const MomentDetailModal = ({ moment, onClose }) => {
   const { user } = useAuth();
   const isOwner = user && moment.user && user.id === moment.user._id;
@@ -479,21 +604,34 @@ const MomentDetailModal = ({ moment, onClose }) => {
     personalNote: moment.personalNote || ''
   });
   const [saving, setSaving] = useState(false);
+  const [error, setError] = useState('');
 
   const handleDownload = () => {
-    const link = document.createElement('a');
-    link.href = moment.mediaUrl;
-    link.download = moment.fileName || 'moment-file';
-    link.target = '_blank';
-    document.body.appendChild(link);
-    link.click();
-    document.body.removeChild(link);
+    try {
+      const link = document.createElement('a');
+      link.href = moment.mediaUrl;
+      link.download = moment.fileName || 'moment-file';
+      link.target = '_blank';
+      link.rel = 'noopener noreferrer';
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+    } catch (err) {
+      console.error('Download error:', err);
+      alert('Failed to download file. Please try opening the link directly.');
+    }
   };
 
   const handleSave = async () => {
     setSaving(true);
+    setError('');
+    
     try {
       const token = localStorage.getItem('token');
+      if (!token) {
+        throw new Error('Please log in again to save changes');
+      }
+
       const response = await fetch(`http://localhost:5050/moments/${moment._id}`, {
         method: 'PUT',
         headers: {
@@ -503,15 +641,16 @@ const MomentDetailModal = ({ moment, onClose }) => {
         body: JSON.stringify(editedData)
       });
 
-      if (response.ok) {
-        setIsEditing(false);
-        window.location.reload();
-      } else {
-        alert('Failed to save changes');
+      if (!response.ok) {
+        const errorData = await response.json();
+        throw new Error(errorData.error || 'Failed to save changes');
       }
+
+      setIsEditing(false);
+      window.location.reload();
     } catch (err) {
       console.error('Save error:', err);
-      alert('Error saving changes');
+      setError(err.message);
     } finally {
       setSaving(false);
     }
@@ -531,13 +670,22 @@ const MomentDetailModal = ({ moment, onClose }) => {
           </div>
           {isOwner && (
             <button
-              onClick={() => setIsEditing(!isEditing)}
-              style={isEditing ? styles.button.danger : styles.button.primary}
+              onClick={() => {
+                setIsEditing(!isEditing);
+                setError('');
+              }}
+              style={isEditing ? styles.button.secondary : styles.button.primary}
             >
               {isEditing ? 'Cancel Edit' : 'Edit'}
             </button>
           )}
         </div>
+
+        {error && (
+          <div style={styles.message.error}>
+            {error}
+          </div>
+        )}
 
         {/* Core Information */}
         <div style={styles.section.container}>
@@ -591,6 +739,7 @@ const MomentDetailModal = ({ moment, onClose }) => {
               readOnly={!isEditing}
               onChange={(e) => isEditing && setEditedData({...editedData, momentDescription: e.target.value})}
               style={isOwner && isEditing ? styles.textarea : {...styles.textarea, backgroundColor: '#f5f5f5'}}
+              placeholder="Describe what happens in this moment"
             />
           </div>
 
@@ -636,10 +785,10 @@ const MomentDetailModal = ({ moment, onClose }) => {
               {moment.fileSize ? formatFileSize(moment.fileSize) : 'Unknown size'} • {moment.mediaType}
             </p>
             <button onClick={handleDownload} style={styles.button.success}>
-              Decentralized Storage Link
+              Open Decentralized Storage Link
             </button>
             <p style={styles.mediaDisplay.warning}>
-              ⚠️ This will download the file to your computer
+              ⚠️ This will open/download the file from permanent storage
             </p>
           </div>
         </div>
@@ -656,7 +805,22 @@ const MomentDetailModal = ({ moment, onClose }) => {
               disabled={saving}
               style={saving ? styles.button.disabled : styles.button.success}
             >
-              {saving ? 'Saving...' : 'Save Changes'}
+              {saving ? (
+                <div style={{ display: 'flex', alignItems: 'center' }}>
+                  <div style={{ 
+                    width: '16px', 
+                    height: '16px', 
+                    border: '2px solid #fff',
+                    borderTop: 'transparent',
+                    borderRadius: '50%',
+                    animation: 'spin 1s linear infinite',
+                    marginRight: '8px'
+                  }}></div>
+                  Saving...
+                </div>
+              ) : (
+                'Save Changes'
+              )}
             </button>
           )}
         </div>
@@ -672,6 +836,7 @@ const EnhancedUploadModal = ({ uploadingMoment, onClose }) => {
   const [uploading, setUploading] = useState(false);
   const [uploadProgress, setUploadProgress] = useState(0);
   const [error, setError] = useState('');
+  const [uploadStage, setUploadStage] = useState('');
   
   const [formData, setFormData] = useState({
     songName: uploadingMoment?.songName || '',
@@ -727,14 +892,20 @@ const EnhancedUploadModal = ({ uploadingMoment, onClose }) => {
     setUploading(true);
     setError('');
     setUploadProgress(0);
+    setUploadStage('Preparing upload...');
 
     try {
-      setUploadProgress(10);
-      
       const formDataUpload = new FormData();
       formDataUpload.append('file', file);
 
       const token = localStorage.getItem('token');
+      if (!token) {
+        throw new Error('Please log in to upload moments');
+      }
+
+      setUploadProgress(10);
+      setUploadStage('Uploading to decentralized storage...');
+
       const fileResponse = await fetch('http://localhost:5050/upload-file', {
         method: 'POST',
         headers: { 'Authorization': `Bearer ${token}` },
@@ -748,6 +919,7 @@ const EnhancedUploadModal = ({ uploadingMoment, onClose }) => {
 
       const fileData = await fileResponse.json();
       setUploadProgress(70);
+      setUploadStage('Saving moment metadata...');
 
       const momentPayload = {
         performanceId: uploadingMoment.performanceId,
@@ -792,6 +964,7 @@ const EnhancedUploadModal = ({ uploadingMoment, onClose }) => {
       }
 
       setUploadProgress(100);
+      setUploadStage('Complete!');
       setStep('success');
 
       setTimeout(() => {
@@ -803,6 +976,7 @@ const EnhancedUploadModal = ({ uploadingMoment, onClose }) => {
       console.error('Upload error:', err);
       setError(err.message);
       setStep('form');
+      setUploadStage('');
     } finally {
       setUploading(false);
     }
@@ -979,8 +1153,11 @@ const EnhancedUploadModal = ({ uploadingMoment, onClose }) => {
               />
             </div>
             
-            <p style={{ color: '#6b7280', fontSize: '1rem' }}>
-              {uploadProgress}% Complete - Saving to decentralized storage
+            <p style={{ color: '#6b7280', fontSize: '1rem', marginBottom: '0.5rem' }}>
+              {uploadProgress}% Complete
+            </p>
+            <p style={{ color: '#9ca3af', fontSize: '0.875rem' }}>
+              {uploadStage}
             </p>
           </div>
         )}
@@ -1005,33 +1182,66 @@ const SmartSongDisplay = ({ song, songIndex, setlist, setInfo, handleUploadMomen
   const [loading, setLoading] = useState(true);
   const [showMoments, setShowMoments] = useState(false);
   const [selectedMoment, setSelectedMoment] = useState(null);
+  const [error, setError] = useState(null);
 
-  useEffect(() => {
-    const fetchMoments = async () => {
+  const momentsFetch = useMemo(() => {
+    return async () => {
       try {
-        const response = await fetch('http://localhost:5050/moments');
+        const response = await fetch(
+          `http://localhost:5050/moments/performance/${setlist.id}`,
+          { signal: AbortSignal.timeout(5000) }
+        );
+        
         if (response.ok) {
           const data = await response.json();
           const filteredMoments = data.moments.filter(
             moment => moment.songName === song.name
           );
           setMoments(filteredMoments);
+        } else {
+          throw new Error('Failed to fetch moments');
         }
       } catch (err) {
-        console.error('Failed to load moments:', err);
+        if (err.name !== 'AbortError') {
+          console.error('Failed to load moments:', err);
+          setError('Failed to load moments');
+        }
       } finally {
         setLoading(false);
       }
     };
+  }, [setlist.id, song.name]);
 
-    fetchMoments();
-  }, [song.name]);
+  useEffect(() => {
+    momentsFetch();
+  }, [momentsFetch]);
 
   if (loading) {
     return (
       <li className="border-b border-gray-100 pb-3">
         <div className="flex justify-between items-center">
-          <span className="font-medium text-gray-400">{song.name} (loading...)</span>
+          <div className="flex items-center gap-2">
+            <span className="font-medium text-gray-400">{song.name}</span>
+            <div className="animate-pulse w-4 h-4 bg-gray-300 rounded"></div>
+          </div>
+          {user && (
+            <button
+              onClick={() => handleUploadMoment(setlist, song, { name: setInfo.name, songIndex: songIndex + 1 })}
+              className="px-3 py-1 bg-blue-600 text-white text-sm rounded hover:bg-blue-700"
+            >
+              Upload Moment
+            </button>
+          )}
+        </div>
+      </li>
+    );
+  }
+
+  if (error) {
+    return (
+      <li className="border-b border-gray-100 pb-3">
+        <div className="flex justify-between items-center">
+          <span className="font-medium text-gray-900">{song.name}</span>
           {user && (
             <button
               onClick={() => handleUploadMoment(setlist, song, { name: setInfo.name, songIndex: songIndex + 1 })}
@@ -1052,9 +1262,13 @@ const SmartSongDisplay = ({ song, songIndex, setlist, setInfo, handleUploadMomen
           {moments.length > 0 ? (
             <button
               onClick={() => setShowMoments(!showMoments)}
-              className="font-medium text-blue-600 hover:text-blue-800 transition-colors text-left"
+              className="font-medium text-blue-600 hover:text-blue-800 transition-colors text-left flex items-center gap-2"
             >
-              {song.name} ({moments.length} moment{moments.length !== 1 ? 's' : ''})
+              {song.name} 
+              <span className="px-2 py-1 text-xs bg-blue-100 text-blue-800 rounded-full">
+                {moments.length} moment{moments.length !== 1 ? 's' : ''}
+              </span>
+              <span className="text-gray-400">{showMoments ? '▼' : '▶'}</span>
             </button>
           ) : (
             <span className="font-medium text-gray-900">{song.name}</span>
@@ -1063,7 +1277,7 @@ const SmartSongDisplay = ({ song, songIndex, setlist, setInfo, handleUploadMomen
           {user && (
             <button
               onClick={() => handleUploadMoment(setlist, song, { name: setInfo.name, songIndex: songIndex + 1 })}
-              className="px-3 py-1 bg-blue-600 text-white text-sm rounded hover:bg-blue-700"
+              className="px-3 py-1 bg-blue-600 text-white text-sm rounded hover:bg-blue-700 transition-colors"
             >
               Upload Moment
             </button>
@@ -1081,6 +1295,11 @@ const SmartSongDisplay = ({ song, songIndex, setlist, setInfo, handleUploadMomen
                 className="px-3 py-2 bg-gray-100 hover:bg-gray-200 text-gray-700 text-sm rounded border transition-colors"
               >
                 by {moment.user?.displayName || 'Anonymous'}
+                {moment.momentType && (
+                  <span className="ml-2 text-xs text-gray-500">
+                    ({moment.momentType})
+                  </span>
+                )}
               </button>
             ))}
             {moments.length > 10 && (
@@ -1116,10 +1335,13 @@ function Setlists({ selectedArtist }) {
     try {
       const response = await fetch(
         `http://localhost:5050/api/rest/1.0/artist/${artist.mbid}/setlists?p=${pageToFetch}`,
-        { headers: { Accept: 'application/json' } }
+        { 
+          headers: { Accept: 'application/json' },
+          signal: AbortSignal.timeout(15000)
+        }
       );
 
-      if (!response.ok) throw new Error('Failed to fetch setlists');
+      if (!response.ok) throw new Error(`Failed to fetch setlists: ${response.status}`);
 
       const data = await response.json();
       if (data && data.setlist) {
@@ -1127,11 +1349,11 @@ function Setlists({ selectedArtist }) {
         setSetlists((prev) => (pageToFetch === 1 ? newSetlists : [...prev, ...newSetlists]));
         if (newSetlists.length === 0) setHasMore(false);
       } else {
-        setError('No setlists found');
+        setError('No setlists found for this artist');
         setHasMore(false);
       }
     } catch (err) {
-      setError(err.message);
+      setError(err.name === 'AbortError' ? 'Request timed out' : err.message);
       setHasMore(false);
     } finally {
       setLoading(false);
@@ -1143,6 +1365,7 @@ function Setlists({ selectedArtist }) {
       setSetlists([]);
       setPage(1);
       setHasMore(true);
+      setError(null);
       fetchSetlists(1, selectedArtist);
     }
   }, [selectedArtist]);
@@ -1174,17 +1397,30 @@ function Setlists({ selectedArtist }) {
         <p className="text-gray-600">Upload moments from their performances</p>
       </div>
 
-      {error && <p className="text-red-600 mb-4">Error: {error}</p>}
+      {error && (
+        <div className="bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded mb-4">
+          <p>⚠️ {error}</p>
+          <button
+            onClick={() => fetchSetlists(1, selectedArtist)}
+            className="mt-2 px-4 py-2 bg-red-600 text-white rounded hover:bg-red-700"
+          >
+            Retry
+          </button>
+        </div>
+      )}
       
       <div className="space-y-4">
         {setlists.map((setlist) => (
           <div key={setlist.id} className="border border-gray-200 rounded-lg bg-white shadow-sm">
             <div
               onClick={() => setExpandedSetlistId(prev => prev === setlist.id ? null : setlist.id)}
-              className="cursor-pointer p-4 hover:bg-gray-50"
+              className="cursor-pointer p-4 hover:bg-gray-50 transition-colors"
             >
               <div className="font-semibold text-lg">
                 {setlist.eventDate} - {setlist.venue.name}, {setlist.venue.city.name}
+                <span className="ml-2 text-gray-400 text-sm">
+                  {expandedSetlistId === setlist.id ? '▼' : '▶'}
+                </span>
               </div>
             </div>
 
@@ -1196,7 +1432,7 @@ function Setlists({ selectedArtist }) {
                     <ol className="space-y-3">
                       {set.song.map((song, i) => (
                         <SmartSongDisplay
-                          key={i}
+                          key={`${song.name}-${i}`}
                           song={song}
                           songIndex={i}
                           setlist={setlist}
@@ -1214,7 +1450,15 @@ function Setlists({ selectedArtist }) {
         ))}
       </div>
 
-      {loading && <p className="text-center py-4">Loading...</p>}
+      {loading && (
+        <div className="text-center py-4">
+          <div className="inline-flex items-center text-gray-500">
+            <div className="animate-spin rounded-full h-6 w-6 border-b-2 border-blue-600 mr-3"></div>
+            Loading setlists...
+          </div>
+        </div>
+      )}
+      
       {!loading && hasMore && setlists.length > 0 && (
         <div className="text-center mt-6">
           <button 
@@ -1223,9 +1467,9 @@ function Setlists({ selectedArtist }) {
               fetchSetlists(nextPage, selectedArtist);
               setPage(nextPage);
             }} 
-            className="px-6 py-3 bg-blue-600 text-white rounded-lg hover:bg-blue-700"
+            className="px-6 py-3 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors"
           >
-            Load More
+            Load More Setlists
           </button>
         </div>
       )}
@@ -1272,14 +1516,13 @@ function MainApp() {
     }
   };
 
-  const handleConcertSelect = (concert) => {
-    handleArtistSelect(concert.artist);
-  };
-
   if (loading) {
     return (
       <div className="min-h-screen flex items-center justify-center">
-        <div className="text-xl">Loading...</div>
+        <div className="text-xl flex items-center">
+          <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-600 mr-3"></div>
+          Loading...
+        </div>
       </div>
     );
   }
@@ -1307,14 +1550,14 @@ function MainApp() {
       <div className="p-4 max-w-7xl mx-auto">
         {/* Header */}
         <div className="flex justify-between items-center mb-8">
-          <h1 className="text-2xl sm:text-4xl font-bold">Concert Moments</h1>
+          <h1 className="text-2xl sm:text-4xl font-bold">mmnts</h1>
           <div className="flex items-center gap-4">
             {user ? (
               <>
                 <span className="text-gray-600">Welcome, {user.displayName}!</span>
                 <button
                   onClick={logout}
-                  className="px-4 py-2 bg-red-600 text-white rounded hover:bg-red-700"
+                  className="px-4 py-2 bg-red-600 text-white rounded hover:bg-red-700 transition-colors"
                 >
                   Logout
                 </button>
@@ -1324,7 +1567,7 @@ function MainApp() {
                 <span className="mr-3">Browse read-only</span>
                 <button
                   onClick={() => setShowLogin(true)}
-                  className="px-4 py-2 bg-blue-600 text-white rounded hover:bg-blue-700"
+                  className="px-4 py-2 bg-blue-600 text-white rounded hover:bg-blue-700 transition-colors"
                 >
                   Login to Upload
                 </button>
@@ -1344,10 +1587,6 @@ function MainApp() {
             <Setlists selectedArtist={selectedArtist} />
             
             <div className="mt-12 pt-8 border-t border-gray-200">
-              <RecentConcerts onConcertSelect={handleConcertSelect} />
-            </div>
-
-            <div className="mt-12 pt-8 border-t border-gray-200">
               <FeaturedArtists onArtistSelect={handleArtistSelect} />
             </div>
           </>
@@ -1355,11 +1594,8 @@ function MainApp() {
           <>
             <FeaturedArtists onArtistSelect={handleArtistSelect} />
             
-            <RecentConcerts onConcertSelect={handleConcertSelect} />
-            
             <div className="text-center py-12 mt-8">
               <div className="text-xl text-gray-600 mb-4">Search for any artist above to view their setlists</div>
-              <div className="text-gray-500">Or choose from featured artists to get started</div>
             </div>
           </>
         )}
