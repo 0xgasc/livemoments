@@ -12,9 +12,15 @@ const Moment = require('./models/Moment');
 const app = express();
 const PORT = 5050;
 
-// Enhanced CORS setup for file uploads
 app.use(cors({
-  origin: ['http://localhost:3000', 'http://127.0.0.1:3000'], // Allow React dev server
+  origin: function(origin, callback) {
+    // Allow localhost and any local network IP (192.168.x.x, 10.x.x.x, etc.)
+    if (!origin || /^https?:\/\/(localhost|127\.0\.0\.1|192\.168\.\d+\.\d+|10\.\d+\.\d+\.\d+)(:\d+)?$/.test(origin)) {
+      callback(null, true);
+    } else {
+      callback(new Error('Not allowed by CORS'));
+    }
+  },
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization']
@@ -522,7 +528,13 @@ app.use((error, req, res, next) => {
   
   res.status(500).json({ error: 'Internal server error' });
 });
-
-app.listen(PORT, () => {
-  console.log(`✅ Server listening at http://localhost:${PORT}`);
+// Catch-all route for undefined endpoints
+app.use('*', (req, res) => {
+  console.log(`❌ Route not found: ${req.method} ${req.originalUrl}`);
+  res.status(404).json({ error: `Route ${req.originalUrl} not found` });
+});
+app.listen(PORT, '0.0.0.0', () => {
+  console.log(`✅ Server listening at http://0.0.0.0:${PORT}`);
+  console.log(`📱 Mobile access: http://192.168.1.170:${PORT}`);
+  console.log(`💻 Local access: http://localhost:${PORT}`);
 });

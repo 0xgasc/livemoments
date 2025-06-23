@@ -2,6 +2,13 @@ import React, { useEffect, useState, createContext, useContext, useCallback, use
 import { styles } from './styles';
 import { formatDate, formatShortDate, formatFileSize, FEATURED_ARTISTS } from './utils';
 
+// API Base URL - automatically detects if running on mobile
+const API_BASE_URL = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1'
+  ? 'http://localhost:5050'  // Local development
+  : `http://${window.location.hostname}:5050`;  // Use same hostname as frontend
+
+console.log('🌐 Current hostname:', window.location.hostname);
+console.log('🌐 Using API Base URL:', API_BASE_URL);
 // Authentication Context
 const AuthContext = createContext();
 
@@ -28,7 +35,7 @@ const AuthProvider = ({ children }) => {
 
   const login = async (email, password) => {
     try {
-      const response = await fetch('http://localhost:5050/login', {
+      const response = await fetch(`${API_BASE_URL}/login`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ email, password }),
@@ -51,7 +58,7 @@ const AuthProvider = ({ children }) => {
 
   const register = async (email, password, displayName) => {
     try {
-      const response = await fetch('http://localhost:5050/register', {
+      const response = await fetch('${API_BASE_URL}/register', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ email, password, displayName }),
@@ -102,13 +109,13 @@ const useDebounce = (value, delay) => {
   return debouncedValue;
 };
 
-// Get major artist status helper
+// Improved getMajorArtistStatus function with better date parsing
 const getMajorArtistStatus = async (artist) => {
   try {
     console.log(`🔍 Fetching setlists for ${artist.name} (${artist.mbid})...`);
     
     const response = await fetch(
-      `http://localhost:5050/api/rest/1.0/artist/${artist.mbid}/setlists?p=1`,
+      `${API_BASE_URL}/api/rest/1.0/artist/${artist.mbid}/setlists?p=1`,
       { 
         headers: { Accept: 'application/json' },
         signal: AbortSignal.timeout(8000)
@@ -126,24 +133,74 @@ const getMajorArtistStatus = async (artist) => {
       const ninetyDaysAgo = new Date();
       ninetyDaysAgo.setDate(ninetyDaysAgo.getDate() - 90);
       
-      const isOnTour = setlists.some(setlist => {
-        if (!setlist.eventDate) return false;
+      console.log(`📅 Checking tour status against date: ${ninetyDaysAgo.toISOString().split('T')[0]}`);
+      
+      // Improved date parsing function
+      const parseSetlistDate = (eventDate) => {
+        if (!eventDate) return null;
         
         try {
           // Handle DD-MM-YYYY format from setlist.fm
-          const [day, month, year] = setlist.eventDate.split('-').map(Number);
-          const concertDate = new Date(year, month - 1, day); // month is 0-indexed
-          return concertDate >= ninetyDaysAgo;
+          if (eventDate.includes('-')) {
+            const parts = eventDate.split('-');
+            if (parts.length === 3) {
+              const day = parseInt(parts[0], 10);
+              const month = parseInt(parts[1], 10);
+              const year = parseInt(parts[2], 10);
+              
+              // Validate the date parts
+              if (year >= 1900 && year <= 2030 && 
+                  month >= 1 && month <= 12 && 
+                  day >= 1 && day <= 31) {
+                
+                const date = new Date(year, month - 1, day); // month is 0-indexed
+                
+                // Double-check the date is valid (handles invalid dates like Feb 30)
+                if (date.getFullYear() === year && 
+                    date.getMonth() === month - 1 && 
+                    date.getDate() === day) {
+                  return date;
+                }
+              }
+            }
+          }
+          
+          // Fallback: try parsing as ISO date or other format
+          const fallbackDate = new Date(eventDate);
+          if (!isNaN(fallbackDate.getTime())) {
+            return fallbackDate;
+          }
+          
+          return null;
         } catch (err) {
+          console.warn(`Failed to parse date: ${eventDate}`, err);
+          return null;
+        }
+      };
+      
+      // Check recent concerts with improved logging
+      const recentConcerts = setlists.filter(setlist => {
+        const concertDate = parseSetlistDate(setlist.eventDate);
+        if (concertDate) {
+          const isRecent = concertDate >= ninetyDaysAgo;
+          console.log(`  📅 ${setlist.eventDate} (${concertDate.toISOString().split('T')[0]}) -> ${isRecent ? '✅ RECENT' : '❌ OLD'}`);
+          return isRecent;
+        } else {
+          console.log(`  📅 ${setlist.eventDate} -> ❌ INVALID DATE`);
           return false;
         }
       });
+      
+      const isOnTour = recentConcerts.length > 0;
+      
+      console.log(`🎪 ${artist.name} tour status: ${isOnTour ? '✅ ON TOUR' : '❌ NOT ON TOUR'} (${recentConcerts.length} recent concerts)`);
       
       return {
         ...artist,
         totalSetlists,
         isMajorArtist: totalSetlists >= 50,
-        isOnTour
+        isOnTour,
+        recentConcerts: recentConcerts.length // Add for debugging
       };
     } else if (response.status === 404) {
       console.log(`⚠️ No setlists found for ${artist.name} (this is normal for some artists)`);
@@ -158,7 +215,7 @@ const getMajorArtistStatus = async (artist) => {
   }
 };
 
-// Enhanced Artist Search Component
+// Enhanced Artist Search Component with improved sorting
 const ArtistSearch = ({ onArtistSelect, currentArtist }) => {
   const [searchQuery, setSearchQuery] = useState('');
   const [searchResults, setSearchResults] = useState([]);
@@ -167,6 +224,87 @@ const ArtistSearch = ({ onArtistSelect, currentArtist }) => {
   const [error, setError] = useState('');
 
   const debouncedSearchQuery = useDebounce(searchQuery, 500);
+
+  // Improved artist sorting function
+  const sortArtistResults = (artists, query) => {
+    const queryLower = query.toLowerCase().trim();
+    
+    return artists.sort((a, b) => {
+      const aName = a.name.toLowerCase();
+      const bName = b.name.toLowerCase();
+      const aDisambiguation = (a.disambiguation || '').toLowerCase();
+      const bDisambiguation = (b.disambiguation || '').toLowerCase();
+      
+      // 1. HIGHEST PRIORITY: Exact match gets top spot
+      const aExact = aName === queryLower;
+      const bExact = bName === queryLower;
+      if (aExact && !bExact) return -1;
+      if (bExact && !aExact) return 1;
+      
+      // 2. Main artist without disambiguation vs. artists with disambiguation
+      const aHasDisambig = a.disambiguation && a.disambiguation.trim().length > 0;
+      const bHasDisambig = b.disambiguation && b.disambiguation.trim().length > 0;
+      
+      // Prefer artists without disambiguation (usually the main artist)
+      if (!aHasDisambig && bHasDisambig) return -1;
+      if (!bHasDisambig && aHasDisambig) return 1;
+      
+      // 3. Penalize obvious collaboration/side project indicators
+      const collaborationWords = ['feat.', 'featuring', 'ft.', '&', ' and ', ' with ', 'vs.', 'versus'];
+      const sideProjectWords = ['tribute', 'cover', 'plays', 'experience', 'society', 'duo', 'cover band'];
+      
+      const aIsCollaboration = collaborationWords.some(word => 
+        aName.includes(word) || aDisambiguation.includes(word)
+      );
+      const bIsCollaboration = collaborationWords.some(word => 
+        bName.includes(word) || bDisambiguation.includes(word)
+      );
+      
+      const aIsSideProject = sideProjectWords.some(word => 
+        aName.includes(word) || aDisambiguation.includes(word)
+      );
+      const bIsSideProject = sideProjectWords.some(word => 
+        bName.includes(word) || bDisambiguation.includes(word)
+      );
+      
+      // Penalize collaborations and side projects
+      if (!aIsCollaboration && bIsCollaboration) return -1;
+      if (!bIsCollaboration && aIsCollaboration) return 1;
+      if (!aIsSideProject && bIsSideProject) return -1;
+      if (!bIsSideProject && aIsSideProject) return 1;
+      
+      // 4. Prefer names that start with the query
+      const aStarts = aName.startsWith(queryLower);
+      const bStarts = bName.startsWith(queryLower);
+      if (aStarts && !bStarts) return -1;
+      if (bStarts && !aStarts) return 1;
+      
+      // 5. For artists with similar names, prefer shorter disambiguation
+      if (aHasDisambig && bHasDisambig) {
+        // Prefer disambiguation that suggests main artist activity
+        const mainArtistIndicators = ['rapper', 'singer', 'musician', 'band', 'us rapper', 'american rapper'];
+        const aIsMainArtist = mainArtistIndicators.some(indicator => 
+          aDisambiguation.includes(indicator)
+        );
+        const bIsMainArtist = mainArtistIndicators.some(indicator => 
+          bDisambiguation.includes(indicator)
+        );
+        
+        if (aIsMainArtist && !bIsMainArtist) return -1;
+        if (bIsMainArtist && !aIsMainArtist) return 1;
+        
+        // Otherwise prefer shorter disambiguation
+        return a.disambiguation.length - b.disambiguation.length;
+      }
+      
+      // 6. Shorter name = more likely to be main artist
+      const nameLengthDiff = a.name.length - b.name.length;
+      if (Math.abs(nameLengthDiff) > 10) return nameLengthDiff;
+      
+      // 7. Alphabetical as final tiebreaker
+      return a.name.localeCompare(b.name);
+    });
+  };
 
   const searchArtists = useCallback(async (query) => {
     if (!query.trim()) {
@@ -180,25 +318,32 @@ const ArtistSearch = ({ onArtistSelect, currentArtist }) => {
     setError('');
     
     try {
-      // Special handling for Muse (since search API doesn't return them)
-      if (query.toLowerCase().trim() === 'muse') {
-        console.log('🎯 Using direct MBID for Muse');
-        const museArtist = { name: 'Muse', mbid: '9c9f1380-2516-4fc9-a3e6-f9f61941d090' };
+      // Special handling for known artists that might have search issues
+      const knownArtistMappings = {
+        'muse': { name: 'Muse', mbid: '9c9f1380-2516-4fc9-a3e6-f9f61941d090' },
+        'tyler the creator': { name: 'Tyler, The Creator', mbid: 'f6beac20-5dfe-4d1f-ae02-0b0a740aafd6' },
+        'tyler, the creator': { name: 'Tyler, The Creator', mbid: 'f6beac20-5dfe-4d1f-ae02-0b0a740aafd6' }
+      };
+      
+      const queryKey = query.toLowerCase().trim();
+      if (knownArtistMappings[queryKey]) {
+        console.log(`🎯 Using known mapping for "${query}"`);
+        const knownArtist = knownArtistMappings[queryKey];
         
         try {
-          const artistWithStatus = await getMajorArtistStatus(museArtist);
+          const artistWithStatus = await getMajorArtistStatus(knownArtist);
           setSearchResults([artistWithStatus]);
           setShowResults(true);
           setSearching(false);
           return;
         } catch (err) {
-          console.error('❌ Error with Muse - will try API search as fallback:', err);
+          console.error(`❌ Error with known artist mapping - will try API search:`, err);
         }
       }
 
       // Regular API search
       const response = await fetch(
-        `http://localhost:5050/api/rest/1.0/search/artists?artistName=${encodeURIComponent(query)}`,
+        `${API_BASE_URL}/api/rest/1.0/search/artists?artistName=${encodeURIComponent(query)}`,
         { 
           headers: { Accept: 'application/json' },
           signal: AbortSignal.timeout(10000)
@@ -212,7 +357,7 @@ const ArtistSearch = ({ onArtistSelect, currentArtist }) => {
       const data = await response.json();
       let artists = (data.artist || []).filter(artist => artist.name && artist.mbid);
 
-      console.log('🔍 API search results for "' + query + '":', artists.map(a => `${a.name} (${a.mbid})`));
+      console.log('🔍 Raw API search results for "' + query + '":', artists.length, 'artists');
 
       if (artists.length === 0) {
         setError(`No artists found for "${query}". Try searching for a different artist.`);
@@ -221,37 +366,14 @@ const ArtistSearch = ({ onArtistSelect, currentArtist }) => {
         return;
       }
 
-      // Smart sorting
-      const queryLower = query.toLowerCase();
-      const sortedArtists = artists.sort((a, b) => {
-        const aName = a.name.toLowerCase();
-        const bName = b.name.toLowerCase();
-        
-        // 1. Exact match gets highest priority
-        const aExact = aName === queryLower;
-        const bExact = bName === queryLower;
-        if (aExact && !bExact) return -1;
-        if (bExact && !aExact) return 1;
-        
-        // 2. Starts with query gets priority
-        const aStarts = aName.startsWith(queryLower);
-        const bStarts = bName.startsWith(queryLower);
-        if (aStarts && !bStarts) return -1;
-        if (bStarts && !aStarts) return 1;
-        
-        // 3. Penalize obvious tribute bands
-        const aTribute = /tribute|cover|plays|experience|society|duo|cover/i.test((a.name + ' ' + (a.disambiguation || '')));
-        const bTribute = /tribute|cover|plays|experience|society|duo|cover/i.test((b.name + ' ' + (b.disambiguation || '')));
-        if (!aTribute && bTribute) return -1;
-        if (!bTribute && aTribute) return 1;
-        
-        // 4. Shorter name = more likely to be main artist
-        return a.name.length - b.name.length;
-      }).slice(0, 10);
+      // Apply improved sorting
+      const sortedArtists = sortArtistResults(artists, query).slice(0, 10);
 
-      console.log('🎯 Sorted results:', sortedArtists.map(a => `${a.name} (${a.mbid}) ${a.disambiguation || ''}`));
+      console.log('🎯 Top sorted results:', sortedArtists.slice(0, 3).map(a => 
+        `${a.name} ${a.disambiguation ? '(' + a.disambiguation + ')' : ''}`
+      ));
 
-      // Get major artist status
+      // Get major artist status for top results
       const artistsWithStatus = await Promise.all(
         sortedArtists.map(getMajorArtistStatus)
       );
@@ -383,10 +505,11 @@ const ArtistSearch = ({ onArtistSelect, currentArtist }) => {
   );
 };
 
-// Featured Artists Component (simplified)
+// Enhanced Featured Artists Component with name-based status checking
 const FeaturedArtists = ({ onArtistSelect }) => {
   const [loading, setLoading] = useState({});
   const [artistCache, setArtistCache] = useState(new Map());
+  const [artistStatuses, setArtistStatuses] = useState(new Map());
 
   const getCachedArtistData = useCallback(async (artistName) => {
     // Check cache first
@@ -396,7 +519,7 @@ const FeaturedArtists = ({ onArtistSelect }) => {
 
     try {
       const response = await fetch(
-        `http://localhost:5050/api/rest/1.0/search/artists?artistName=${encodeURIComponent(artistName)}`,
+        `${API_BASE_URL}/api/rest/1.0/search/artists?artistName=${encodeURIComponent(artistName)}`,
         { headers: { Accept: 'application/json' } }
       );
 
@@ -423,6 +546,115 @@ const FeaturedArtists = ({ onArtistSelect }) => {
     
     return null;
   }, [artistCache]);
+
+  // Smart status checker that tries multiple approaches
+  const getArtistStatus = useCallback(async (artist) => {
+    console.log(`🔍 Getting status for ${artist.name}...`);
+    
+    // Method 1: Try the original MBID first (works for Muse and major artists)
+    try {
+      console.log(`  📋 Method 1: Trying original MBID ${artist.mbid}`);
+      const statusWithOriginalMbid = await getMajorArtistStatus(artist);
+      
+      // If we get setlist data, use it
+      if (statusWithOriginalMbid.totalSetlists > 0) {
+        console.log(`  ✅ Method 1 SUCCESS: ${statusWithOriginalMbid.totalSetlists} setlists found`);
+        return statusWithOriginalMbid;
+      } else {
+        console.log(`  ❌ Method 1 FAILED: No setlists found`);
+      }
+    } catch (err) {
+      console.log(`  ❌ Method 1 ERROR:`, err.message);
+    }
+    
+    // Method 2: Search by name and use that MBID
+    try {
+      console.log(`  🔍 Method 2: Searching by name "${artist.name}"`);
+      const artistData = await getCachedArtistData(artist.name);
+      
+      if (artistData && artistData.mbid) {
+        console.log(`  📋 Method 2: Found MBID ${artistData.mbid} (${artistData.mbid === artist.mbid ? 'SAME' : 'DIFFERENT'})`);
+        const statusWithSearchMbid = await getMajorArtistStatus(artistData);
+        
+        if (statusWithSearchMbid.totalSetlists > 0) {
+          console.log(`  ✅ Method 2 SUCCESS: ${statusWithSearchMbid.totalSetlists} setlists found`);
+          return statusWithSearchMbid;
+        } else {
+          console.log(`  ❌ Method 2 FAILED: No setlists found with search MBID`);
+        }
+      } else {
+        console.log(`  ⚠️ Method 2 SKIPPED: No search result found`);
+      }
+    } catch (err) {
+      console.log(`  ❌ Method 2 ERROR:`, err.message);
+    }
+    
+    // Method 3: Try alternative name searches (for artists with special characters)
+    if (artist.name.includes('.') || artist.name.includes('&')) {
+      try {
+        console.log(`  🔍 Method 3: Trying alternative name searches`);
+        
+        const alternatives = [];
+        
+        // For "Fontaines D.C." try "Fontaines DC" 
+        if (artist.name.includes('D.C.')) {
+          alternatives.push(artist.name.replace('D.C.', 'DC'));
+        }
+        
+        // Try without periods
+        if (artist.name.includes('.')) {
+          alternatives.push(artist.name.replace(/\./g, ''));
+        }
+        
+        for (const altName of alternatives) {
+          console.log(`    🔍 Trying alternative: "${altName}"`);
+          const artistData = await getCachedArtistData(altName);
+          
+          if (artistData && artistData.mbid) {
+            console.log(`    📋 Found MBID ${artistData.mbid} for "${altName}"`);
+            const statusWithAltMbid = await getMajorArtistStatus(artistData);
+            
+            if (statusWithAltMbid.totalSetlists > 0) {
+              console.log(`    ✅ Method 3 SUCCESS: ${statusWithAltMbid.totalSetlists} setlists found`);
+              return statusWithAltMbid;
+            }
+          }
+        }
+        
+        console.log(`  ❌ Method 3 FAILED: No alternatives worked`);
+      } catch (err) {
+        console.log(`  ❌ Method 3 ERROR:`, err.message);
+      }
+    }
+    
+    // Method 4: Return default (no status)
+    console.log(`  🚫 All methods failed for ${artist.name}`);
+    return { ...artist, totalSetlists: 0, isMajorArtist: false, isOnTour: false };
+  }, [getCachedArtistData]);
+
+  // Load artist statuses on mount
+  useEffect(() => {
+    const loadArtistStatuses = async () => {
+      const statusPromises = FEATURED_ARTISTS.map(async (artist) => {
+        try {
+          const status = await getArtistStatus(artist);
+          return { name: artist.name, status };
+        } catch (err) {
+          console.error(`❌ Final error getting status for ${artist.name}:`, err);
+          return { name: artist.name, status: { ...artist, totalSetlists: 0, isMajorArtist: false, isOnTour: false } };
+        }
+      });
+
+      const results = await Promise.all(statusPromises);
+      const statusMap = new Map();
+      results.forEach(({ name, status }) => {
+        statusMap.set(name, status);
+      });
+      setArtistStatuses(statusMap);
+    };
+
+    loadArtistStatuses();
+  }, [getArtistStatus]);
 
   const handleFeaturedArtistClick = async (artistName) => {
     setLoading(prev => ({ ...prev, [artistName]: true }));
@@ -456,53 +688,118 @@ const FeaturedArtists = ({ onArtistSelect }) => {
   return (
     <div className="mb-8">
       <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-6 gap-3 sm:gap-4">
-        {FEATURED_ARTISTS.map((artist) => (
-          <button
-            key={artist.mbid}
-            onClick={() => handleFeaturedArtistClick(artist.name)}
-            disabled={loading[artist.name]}
-            className="p-4 bg-white rounded-lg shadow-sm hover:shadow-md transition-all duration-200 border border-gray-200 hover:border-blue-300 disabled:opacity-50 disabled:cursor-not-allowed"
-          >
-            <div className="text-sm font-medium text-center text-gray-900 leading-tight">
-              {loading[artist.name] ? (
-                <div className="flex items-center justify-center">
-                  <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-blue-600 mr-2"></div>
-                  Loading...
+        {FEATURED_ARTISTS.map((artist) => {
+          const status = artistStatuses.get(artist.name);
+          
+          return (
+            <button
+              key={artist.mbid}
+              onClick={() => handleFeaturedArtistClick(artist.name)}
+              disabled={loading[artist.name]}
+              className="p-3 bg-white rounded-lg shadow-sm hover:shadow-md transition-all duration-200 border border-gray-200 hover:border-blue-300 disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              <div className="text-sm font-medium text-center text-gray-900 leading-tight mb-2">
+                {loading[artist.name] ? (
+                  <div className="flex items-center justify-center">
+                    <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-blue-600 mr-2"></div>
+                    Loading...
+                  </div>
+                ) : (
+                  artist.name
+                )}
+              </div>
+              
+              {/* Status Tags */}
+              {status && !loading[artist.name] && (
+                <div className="flex flex-wrap gap-1 justify-center">
+                  {status.totalSetlists > 0 && (
+                    <span className="px-1.5 py-0.5 text-xs bg-blue-100 text-blue-800 rounded-full">
+                      {status.totalSetlists} shows
+                    </span>
+                  )}
+                  {status.isOnTour && (
+                    <span className="px-1.5 py-0.5 text-xs bg-green-100 text-green-800 rounded-full">
+                      on tour
+                    </span>
+                  )}
                 </div>
-              ) : (
-                artist.name
               )}
-            </div>
-          </button>
-        ))}
+            </button>
+          );
+        })}
       </div>
     </div>
   );
 };
 
-// Login Component
+// Improved Login Component with better user workflow
 const Login = () => {
-  const [isLogin, setIsLogin] = useState(true);
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [displayName, setDisplayName] = useState('');
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
+  const [mode, setMode] = useState('login'); // 'login', 'register', 'userNotFound'
+  const [message, setMessage] = useState('');
   const { login, register } = useAuth();
 
-  const handleSubmit = async () => {
+  const handleLogin = async () => {
     setLoading(true);
     setError('');
+    setMessage('');
 
     try {
-      if (isLogin) {
-        await login(email, password);
+      await login(email, password);
+      setMessage('Login successful! Refreshing page...');
+      
+      // Refresh the page after successful login
+      setTimeout(() => {
+        window.location.reload();
+      }, 1000);
+      
+    } catch (err) {
+      console.log('Login error:', err.message);
+      
+      // Check if it's a "user not found" error
+      if (err.message.includes('User not found') || err.message.includes('not found')) {
+        setMode('userNotFound');
+        setError('');
+        setMessage(''); // Clear message when switching to userNotFound mode
       } else {
-        if (!displayName.trim()) {
-          throw new Error('Display name is required');
-        }
-        await register(email, password, displayName);
+        setError(err.message);
       }
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleRegister = async () => {
+    setLoading(true);
+    setError('');
+    setMessage('');
+
+    // Validation
+    if (!displayName.trim()) {
+      setError('Display name is required');
+      setLoading(false);
+      return;
+    }
+
+    if (password.length < 6) {
+      setError('Password must be at least 6 characters');
+      setLoading(false);
+      return;
+    }
+
+    try {
+      await register(email, password, displayName);
+      setMessage('Account created successfully! Refreshing page...');
+      
+      // Refresh the page after successful registration
+      setTimeout(() => {
+        window.location.reload();
+      }, 1000);
+      
     } catch (err) {
       setError(err.message);
     } finally {
@@ -510,75 +807,179 @@ const Login = () => {
     }
   };
 
+  const handleSubmit = (e) => {
+    e.preventDefault();
+    
+    if (mode === 'login') {
+      handleLogin();
+    } else if (mode === 'register' || mode === 'userNotFound') {
+      handleRegister();
+    }
+  };
+
+  const switchToRegister = () => {
+    setMode('register');
+    setError('');
+    setMessage('');
+    if (!displayName) {
+      // Auto-suggest display name from email
+      const emailName = email.split('@')[0];
+      setDisplayName(emailName);
+    }
+  };
+
+  const switchToLogin = () => {
+    setMode('login');
+    setError('');
+    setMessage('');
+    setDisplayName('');
+  };
+
+  const startOver = () => {
+    setMode('login');
+    setError('');
+    setMessage('');
+    setEmail('');
+    setPassword('');
+    setDisplayName('');
+  };
+
   return (
     <div className="min-h-screen flex items-center justify-center bg-gray-50">
       <div className="bg-white p-8 rounded-lg shadow-lg w-full max-w-md">
-        <h2 className="text-2xl font-bold text-center mb-6">
-          {isLogin ? 'Login' : 'Register'}
-        </h2>
+        {/* Header */}
+        <div className="text-center mb-6">
+          <h2 className="text-2xl font-bold text-gray-900">
+            {mode === 'login' ? 'Welcome Back' : 
+             mode === 'userNotFound' ? 'Create Account' : 
+             'Create Account'}
+          </h2>
+          <p className="text-gray-600 mt-2">
+            {mode === 'login' ? 'Sign in to upload and manage your concert moments' :
+             mode === 'userNotFound' ? 'Set up your new account to get started' :
+             'Join the community of concert moment collectors'}
+          </p>
+        </div>
         
+        {/* Success Message */}
+        {message && (
+          <div className="bg-green-100 border border-green-400 text-green-700 px-4 py-3 rounded mb-4 text-center">
+            <div className="flex items-center justify-center">
+              <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-green-600 mr-2"></div>
+              {message}
+            </div>
+          </div>
+        )}
+
+        {/* Error Message */}
         {error && (
           <div className="bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded mb-4">
             {error}
           </div>
         )}
 
-        <div className="space-y-4">
-          {!isLogin && (
+        {/* User Not Found Message - only show in userNotFound mode */}
+        {mode === 'userNotFound' && (
+          <div className="bg-blue-100 border border-blue-400 text-blue-700 px-4 py-3 rounded mb-4 text-center">
+            <p className="font-medium">No account found for {email}</p>
+            <p className="text-sm mt-1">Would you like to create a new account with this email?</p>
+          </div>
+        )}
+
+        <form onSubmit={handleSubmit} className="space-y-4">
+          {/* Display Name - only for register modes */}
+          {(mode === 'register' || mode === 'userNotFound') && (
             <div>
-              <label className="block text-sm font-medium text-gray-700 mb-1">Display Name</label>
+              <label className="block text-sm font-medium text-gray-700 mb-1">
+                Display Name *
+              </label>
               <input
                 type="text"
                 value={displayName}
                 onChange={(e) => setDisplayName(e.target.value)}
                 className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+                placeholder="How others will see you"
+                required
               />
             </div>
           )}
           
+          {/* Email */}
           <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">Email</label>
+            <label className="block text-sm font-medium text-gray-700 mb-1">
+              Email *
+            </label>
             <input
               type="email"
               value={email}
               onChange={(e) => setEmail(e.target.value)}
               className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+              placeholder="your@email.com"
+              required
+              disabled={mode === 'userNotFound' && loading} // Only disable when loading in userNotFound mode
             />
           </div>
           
+          {/* Password */}
           <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">Password</label>
+            <label className="block text-sm font-medium text-gray-700 mb-1">
+              Password *
+            </label>
             <input
               type="password"
               value={password}
               onChange={(e) => setPassword(e.target.value)}
               className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+              placeholder={mode === 'login' ? 'Enter your password' : 'Create a password (min 6 characters)'}
+              required
+              minLength={mode !== 'login' ? 6 : undefined}
             />
           </div>
           
+          {/* Submit Button */}
           <button
-            onClick={handleSubmit}
-            disabled={loading || !email || !password || (!isLogin && !displayName)}
-            className="w-full bg-blue-600 text-white py-2 px-4 rounded-md hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed"
+            type="submit"
+            disabled={loading || !email || !password || ((mode === 'register' || mode === 'userNotFound') && !displayName)}
+            className="w-full bg-blue-600 text-white py-2 px-4 rounded-md hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
           >
             {loading ? (
               <div className="flex items-center justify-center">
                 <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-white mr-2"></div>
-                Processing...
+                {mode === 'login' ? 'Signing In...' : 'Creating Account...'}
               </div>
             ) : (
-              isLogin ? 'Login' : 'Register'
+              mode === 'login' ? 'Sign In' : 'Create Account'
             )}
           </button>
-        </div>
+        </form>
         
-        <div className="text-center mt-4">
-          <button
-            onClick={() => setIsLogin(!isLogin)}
-            className="text-blue-600 hover:text-blue-800 underline"
-          >
-            {isLogin ? 'Need an account? Register' : 'Have an account? Login'}
-          </button>
+        {/* Mode Switching */}
+        <div className="text-center mt-6">
+          {mode === 'login' ? (
+            <button
+              onClick={switchToRegister}
+              className="text-blue-600 hover:text-blue-800 underline"
+              disabled={loading}
+            >
+              Don't have an account? Create one
+            </button>
+          ) : mode === 'userNotFound' ? (
+            <button
+              onClick={startOver}
+              className="text-gray-600 hover:text-gray-800 underline"
+              disabled={loading}
+            >
+              Try different email address
+            </button>
+          ) : (
+            <button
+              onClick={switchToLogin}
+              className="text-blue-600 hover:text-blue-800 underline"
+              disabled={loading}
+            >
+              Already have an account? Sign in
+            </button>
+          )}
         </div>
       </div>
     </div>
@@ -632,7 +1033,7 @@ const MomentDetailModal = ({ moment, onClose }) => {
         throw new Error('Please log in again to save changes');
       }
 
-      const response = await fetch(`http://localhost:5050/moments/${moment._id}`, {
+      const response = await fetch(`${API_BASE_URL}/moments/${moment._id}`, {
         method: 'PUT',
         headers: {
           'Content-Type': 'application/json',
@@ -906,7 +1307,7 @@ const EnhancedUploadModal = ({ uploadingMoment, onClose }) => {
       setUploadProgress(10);
       setUploadStage('Uploading to decentralized storage...');
 
-      const fileResponse = await fetch('http://localhost:5050/upload-file', {
+      const fileResponse = await fetch(`${API_BASE_URL}/upload-file`, {
         method: 'POST',
         headers: { 'Authorization': `Bearer ${token}` },
         body: formDataUpload
@@ -949,7 +1350,7 @@ const EnhancedUploadModal = ({ uploadingMoment, onClose }) => {
         uniqueElements: formData.uniqueElements
       };
 
-      const momentResponse = await fetch('http://localhost:5050/upload-moment', {
+      const momentResponse = await fetch(`${API_BASE_URL}/upload-moment`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -1188,7 +1589,7 @@ const SmartSongDisplay = ({ song, songIndex, setlist, setInfo, handleUploadMomen
     return async () => {
       try {
         const response = await fetch(
-          `http://localhost:5050/moments/performance/${setlist.id}`,
+          `${API_BASE_URL}/moments/performance/${setlist.id}`,
           { signal: AbortSignal.timeout(5000) }
         );
         
@@ -1334,7 +1735,7 @@ function Setlists({ selectedArtist }) {
     setError(null);
     try {
       const response = await fetch(
-        `http://localhost:5050/api/rest/1.0/artist/${artist.mbid}/setlists?p=${pageToFetch}`,
+        `${API_BASE_URL}/api/rest/1.0/artist/${artist.mbid}/setlists?p=${pageToFetch}`,
         { 
           headers: { Accept: 'application/json' },
           signal: AbortSignal.timeout(15000)

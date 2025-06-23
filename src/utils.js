@@ -91,13 +91,8 @@ export const formatShortDate = (dateString) => {
 export const FEATURED_ARTISTS = [
   { name: 'Muse', mbid: '9c9f1380-2516-4fc9-a3e6-f9f61941d090' },
   { name: 'Green Day', mbid: '084308bd-1654-436f-ba03-df6697104e19' },
-  { name: 'Radiohead', mbid: 'a74b1b7f-71a5-4011-9441-d0b5e4122711' },
   { name: 'Pearl Jam', mbid: '83b9cbe7-9857-49e2-ab8e-b57b01038103' },
   { name: 'Metallica', mbid: '65f4f0c5-ef9e-490c-aee3-909e7ae6b2ab' },
-  { name: 'Red Hot Chili Peppers', mbid: '8bfac288-ccc5-448d-9573-c33ea2aa5c30' },
-  { name: 'Foo Fighters', mbid: '67f66c07-6e61-4026-ade5-7e782fad3a5d' },
-  { name: 'Coldplay', mbid: 'cc197bad-dc9c-440d-a5b5-d52ba2e14234' },
-  { name: 'Arctic Monkeys', mbid: 'ada7a83c-e3e1-40f1-93f9-3e73dbc9298a' },
   { name: 'Unknown Mortal Orchestra', mbid: '33d2ccc9-7e64-44b2-ad8c-618d9499bf42' },
   { name: 'Fontaines D.C.', mbid: '2bcac0f6-ee1b-4856-8264-a8b3262b9d3c' },
   { name: 'Daniel Me Estas Matando', mbid: '63f31a0f-2756-43e4-b58f-61e7b0e83b57' }
